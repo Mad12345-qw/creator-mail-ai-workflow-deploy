@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: creator-mail-ai-workflow
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: SAFE_TEST_MODE
+        value: true
+      - key: MAIL_PROVIDER
+        value: feishu
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
