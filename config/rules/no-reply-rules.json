@@ -1,0 +1,33 @@
+{
+  "version": "2026-07-09",
+  "rules": [
+    {
+      "id": "system-delivery-notice",
+      "name": "System delivery notice",
+      "match": ["delivery status notification", "undelivered mail", "mail delivery failed"],
+      "action": "no_reply",
+      "notes": "Record only."
+    },
+    {
+      "id": "auto-reply",
+      "name": "Auto reply or out of office",
+      "match": ["out of office", "automatic reply", "vacation auto reply"],
+      "action": "no_reply",
+      "notes": "Do not reply to automated responses."
+    },
+    {
+      "id": "simple-ack",
+      "name": "Simple acknowledgement without new information",
+      "match": ["thanks", "thank you", "got it", "noted", "sounds good"],
+      "action": "no_reply",
+      "notes": "Only applies when no new business information is included."
+    },
+    {
+      "id": "stop-contact",
+      "name": "Stop contacting request",
+      "match": ["unsubscribe", "remove me", "stop contacting", "do not follow up"],
+      "action": "record_only",
+      "notes": "Update creator contact status."
+    }
+  ]
+}

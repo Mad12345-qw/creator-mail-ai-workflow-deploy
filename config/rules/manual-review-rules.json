@@ -1,0 +1,33 @@
+{
+  "version": "2026-07-09",
+  "rules": [
+    {
+      "id": "paid-collaboration",
+      "name": "Paid collaboration",
+      "match": ["rate card", "quote", "budget", "flat fee", "package fee", "hybrid", "payment terms"],
+      "action": "manual_review",
+      "notes": "All paid collaboration content must be reviewed before sending."
+    },
+    {
+      "id": "agreement",
+      "name": "Agreement or contract",
+      "match": ["agreement", "contract", "signature", "legal name", "usage rights"],
+      "action": "manual_review",
+      "notes": "Agreement drafts and changes must be manually reviewed."
+    },
+    {
+      "id": "payment",
+      "name": "Payment issue",
+      "match": ["payment", "paypal", "bank account", "invoice", "unpaid", "paid"],
+      "action": "manual_review",
+      "notes": "Payment status must not be confirmed by AI alone."
+    },
+    {
+      "id": "complaint-or-legal",
+      "name": "Complaint, legal, safety, or compliance issue",
+      "match": ["complaint", "refund", "injury", "allergy", "legal", "lawsuit", "claim"],
+      "action": "manual_review",
+      "notes": "High-risk issues require human handling."
+    }
+  ]
+}

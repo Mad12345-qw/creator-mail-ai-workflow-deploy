@@ -1,0 +1,26 @@
+{
+  "version": "2026-07-09",
+  "rules": [
+    {
+      "id": "quote-detected",
+      "when": "creator_quote_detected",
+      "communicationStatus": "已获取报价",
+      "collaborationStatus": "付费合作报价审核中",
+      "todo": "等待业务人员审核报价"
+    },
+    {
+      "id": "quote-confirmation-sent",
+      "when": "quote_confirmation_sent",
+      "communicationStatus": "已发送报价确认",
+      "collaborationStatus": "付费合作报价审核中",
+      "todo": "等待业务人员选择报价处理方式"
+    },
+    {
+      "id": "draft-needs-review",
+      "when": "draft_generated_manual_review",
+      "communicationStatus": "回复需人工审核",
+      "collaborationStatus": "保持当前实际阶段",
+      "todo": "等待业务人员审核回复"
+    }
+  ]
+}

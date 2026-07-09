@@ -60,6 +60,9 @@ export function getConfig() {
       url: process.env.UPSTASH_REDIS_REST_URL || "",
       token: process.env.UPSTASH_REDIS_REST_TOKEN || "",
       keyPrefix: process.env.REDIS_KEY_PREFIX || "creator-mail-ai"
+    },
+    rules: {
+      directory: process.env.RULES_DIR || "config/rules"
     }
   };
 }
