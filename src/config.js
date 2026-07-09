@@ -55,7 +55,7 @@ export function getConfig() {
     aiProvider: process.env.AI_PROVIDER || (process.env.DEEPSEEK_API_KEY ? "deepseek" : "openai"),
     deepseek: {
       apiKey: process.env.DEEPSEEK_API_KEY || "",
-      model: process.env.DEEPSEEK_MODEL || "deepseek-v4-flash",
+      model: process.env.DEEPSEEK_MODEL || "deepseek-chat",
       baseUrl: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com"
     },
     openai: {
