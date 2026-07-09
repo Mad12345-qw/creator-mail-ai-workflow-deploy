@@ -52,6 +52,12 @@ export function getConfig() {
       appToken: process.env.BITABLE_APP_TOKEN || "",
       tables: readTables()
     },
+    aiProvider: process.env.AI_PROVIDER || (process.env.DEEPSEEK_API_KEY ? "deepseek" : "openai"),
+    deepseek: {
+      apiKey: process.env.DEEPSEEK_API_KEY || "",
+      model: process.env.DEEPSEEK_MODEL || "deepseek-v4-flash",
+      baseUrl: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com"
+    },
     openai: {
       apiKey: process.env.OPENAI_API_KEY || "",
       model: process.env.OPENAI_MODEL || "gpt-5-mini"
@@ -74,7 +80,11 @@ export function getMissingConfig(config = getConfig()) {
   }
   if (!config.feishu.appId) missing.push("FEISHU_APP_ID");
   if (!config.feishu.appSecret) missing.push("FEISHU_APP_SECRET");
-  if (!config.openai.apiKey) missing.push("OPENAI_API_KEY");
+  if (config.aiProvider === "deepseek") {
+    if (!config.deepseek.apiKey) missing.push("DEEPSEEK_API_KEY");
+  } else if (!config.openai.apiKey) {
+    missing.push("OPENAI_API_KEY");
+  }
   if (!config.bitable.appToken) missing.push("BITABLE_APP_TOKEN");
   return missing;
 }

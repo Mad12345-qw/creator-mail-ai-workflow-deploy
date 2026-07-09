@@ -10,7 +10,7 @@
 - `POST /jobs/poll-email` 定时拉取邮件入口
 - `POST /debug/process-sample-email` 本地样例邮件处理入口
 - Render 免费实例配置 `render.yaml`
-- 飞书、多维表格、GPT 的环境变量占位
+- 飞书、多维表格、DeepSeek/GPT 的环境变量占位
 - Upstash Redis REST 接入模块
 - `config/rules` 稳定规则配置，达人表和报价规则仍从飞书读取
 - 工作流骨架：识别邮件、读取动态数据、生成建议、写入日志/待办
@@ -32,7 +32,7 @@ http://localhost:8787/health
 - 飞书自建应用的 App ID / App Secret
 - 邮箱收发授权信息
 - 飞书多维表格 app_token 和各数据表 table_id
-- GPT 使用方式对应的服务端配置
+- DeepSeek 或 GPT 使用方式对应的服务端配置
 - `CRON_SECRET`
 - Upstash Redis 的 REST URL / REST Token
 
