@@ -4,6 +4,7 @@ import { getConfig, getMissingConfig } from "./config.js";
 import { FeishuClient } from "./feishuClient.js";
 import { OpenAIClient } from "./openaiClient.js";
 import { RedisStore } from "./redisStore.js";
+import { RuleStore } from "./ruleStore.js";
 import { getPathAndQuery, readJson, sendJson, sendRedirect, sendText } from "./http.js";
 import { processCreatorEmail } from "./workflow.js";
 
@@ -11,6 +12,7 @@ const config = getConfig();
 const feishu = new FeishuClient(config);
 const openai = new OpenAIClient(config);
 const redis = new RedisStore(config);
+const ruleStore = new RuleStore(config);
 let lastMailboxEvent = { status: "not_received" };
 let lastMailboxPoll = { status: "not_started" };
 
@@ -141,7 +143,8 @@ async function pollMailbox() {
     await processCreatorEmail({
       email: mapMailboxMessage(fullMessage, messageId),
       feishu,
-      openai
+      openai,
+      ruleStore
     });
     await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
     processed.push(messageId);
@@ -252,9 +255,10 @@ async function processMailboxEvent(body) {
     accessToken: userToken.accessToken
   });
   await processCreatorEmail({
-    email: mapMailboxMessage(message, messageId),
-    feishu,
-    openai
+      email: mapMailboxMessage(message, messageId),
+      feishu,
+      openai,
+      ruleStore
   });
 }
 
@@ -447,7 +451,7 @@ async function handleLatestTestMailboxMessage(res, query) {
     });
     const email = mapMailboxMessage(fullMessage, messageId);
     if (!/^(MAIL EVENT TEST|POLLING TEST READY|POLLING FINAL CHECK)/i.test(email.subject || "")) continue;
-    const result = await processCreatorEmail({ email, feishu, openai });
+    const result = await processCreatorEmail({ email, feishu, openai, ruleStore });
     await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
     return sendJson(res, 200, {
       ok: true,
@@ -500,7 +504,8 @@ async function handleSampleEmail(req, res) {
       text: body.text || "Hi, please let me know your budget for one TikTok video."
     },
     feishu,
-    openai
+    openai,
+    ruleStore
   });
   return sendJson(res, 200, { ok: true, result });
 }

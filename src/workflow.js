@@ -28,12 +28,28 @@ function decideAction(intent) {
   return "draft_reply";
 }
 
-export async function processCreatorEmail({ email, feishu, openai }) {
+function findMatchingRule(email, rules) {
+  const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
+  const files = ["no-reply-rules.json", "manual-review-rules.json"];
+  for (const file of files) {
+    for (const rule of rules?.[file]?.rules || []) {
+      if ((rule.match || []).some((phrase) => text.includes(String(phrase).toLowerCase()))) {
+        return rule;
+      }
+    }
+  }
+  return null;
+}
+
+export async function processCreatorEmail({ email, feishu, openai, ruleStore }) {
   const fallbackIntent = inferIntent(email);
   const creator = await feishu.findCreatorByEmail(email.from);
+  const rules = ruleStore ? await ruleStore.load() : {};
+  const matchedRule = findMatchingRule(email, rules);
   const context = {
     note: "Creator data is read from the live Feishu creator table when a sender match exists.",
     creator: creator ? { name: creator.name, recordId: creator.recordId } : null,
+    matchedRule: matchedRule ? { id: matchedRule.id, action: matchedRule.action, notes: matchedRule.notes } : null,
     fallbackIntent,
     fallbackAction: decideAction(fallbackIntent)
   };
@@ -41,7 +57,7 @@ export async function processCreatorEmail({ email, feishu, openai }) {
   const analysis = await openai.analyzeEmail(email, context);
   const intent = analysis.intent && analysis.intent !== "unconfigured" ? analysis.intent : fallbackIntent;
   const permittedActions = new Set(["no_reply", "record_only", "draft_reply", "manual_review"]);
-  const action = permittedActions.has(analysis.action) ? analysis.action : decideAction(intent);
+  const action = matchedRule?.action || (permittedActions.has(analysis.action) ? analysis.action : decideAction(intent));
 
   const logFields = {
     "邮件ID": email.messageId || "",
@@ -78,6 +94,7 @@ export async function processCreatorEmail({ email, feishu, openai }) {
     intent,
     action,
     creatorMatch: creator ? { recordId: creator.recordId, name: creator.name } : null,
+    matchedRule: matchedRule?.id || null,
     analysis,
     writeResult,
     approvalResult
