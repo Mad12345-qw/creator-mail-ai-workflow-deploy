@@ -320,6 +320,30 @@ async function handleMailboxFolders(res, query) {
   });
 }
 
+async function handleRecentMailboxMessages(res, query) {
+  if (!verifyCronToken(query)) {
+    return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
+  }
+  const userToken = await getUserToken();
+  if (!userToken) {
+    return sendJson(res, 409, { ok: false, error: "mailbox_owner_authorization_required" });
+  }
+  const data = await feishu.listMailboxMessages({
+    accessToken: userToken.accessToken,
+    folderId: config.feishu.inboxFolderId,
+    pageSize: 20
+  });
+  const messages = data.items || data.messages || [];
+  return sendJson(res, 200, {
+    ok: true,
+    messages: messages.map((message) => ({
+      id: message.message_id || message.id || "",
+      subject: message.subject || "",
+      receivedAt: message.received_time || message.sent_time || ""
+    }))
+  });
+}
+
 async function handlePollEmail(req, res, query) {
   if (!verifyCronToken(query)) {
     return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
@@ -385,6 +409,10 @@ async function route(req, res) {
 
   if (req.method === "GET" && path === "/debug/mail/folders") {
     return handleMailboxFolders(res, query);
+  }
+
+  if (req.method === "GET" && path === "/debug/mail/recent") {
+    return handleRecentMailboxMessages(res, query);
   }
 
   if ((req.method === "GET" || req.method === "POST") && path === "/jobs/poll-email") {
