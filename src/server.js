@@ -147,14 +147,21 @@ async function handleFeishuWebhook(req, res) {
   if (body.challenge) {
     return sendJson(res, 200, { challenge: body.challenge });
   }
+  const eventType = body.header?.event_type || body.type || "";
+  const messageId = eventValue(body.event || body, ["message_id", "mail_message_id"]);
+  await recordMailboxEvent({
+    status: "callback_received",
+    eventType,
+    messageIdPresent: Boolean(messageId),
+    error: ""
+  });
   const token = body.token || body.header?.token;
   if (config.feishu.verificationToken && token && token !== config.feishu.verificationToken) {
+    await recordMailboxEvent({ status: "rejected_invalid_verification_token", error: "verification token mismatch" });
     return sendJson(res, 401, { ok: false, error: "invalid_feishu_token" });
   }
   sendJson(res, 200, { ok: true, received: true });
-  const eventType = body.header?.event_type || body.type || "";
   if (eventType.includes("user_mailbox") || eventValue(body.event || body, ["message_id", "mail_message_id"])) {
-    const messageId = eventValue(body.event || body, ["message_id", "mail_message_id"]);
     await recordMailboxEvent({
       status: "webhook_received",
       eventType,
