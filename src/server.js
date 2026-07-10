@@ -571,6 +571,7 @@ async function route(req, res) {
       redisConfigured: redis.isConfigured(),
       mailboxOAuthRedirectConfigured: Boolean(getOAuthRedirectUri()),
       outboundTracking: "enabled",
+      publicSampleProcessing: false,
       missingConfig: getMissingConfig(config)
     });
   }
