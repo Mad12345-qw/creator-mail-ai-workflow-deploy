@@ -334,8 +334,13 @@ async function handleRecentMailboxMessages(res, query) {
     pageSize: 20
   });
   const messages = data.items || data.messages || [];
+  const first = messages[0] || {};
   return sendJson(res, 200, {
     ok: true,
+    messageShape: Object.fromEntries(Object.entries(first).map(([key, value]) => [
+      key,
+      value && typeof value === "object" ? Object.keys(value) : typeof value
+    ])),
     messages: messages.map((message) => ({
       id: message.message_id || message.id || "",
       subject: message.subject || "",
