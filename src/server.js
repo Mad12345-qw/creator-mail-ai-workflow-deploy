@@ -91,6 +91,11 @@ function readAddress(value) {
   return "";
 }
 
+function getMailboxMessageId(message) {
+  if (typeof message === "string") return message;
+  return message?.message_id || message?.id || "";
+}
+
 function mapMailboxMessage(message, fallbackMessageId) {
   const source = message.message || message;
   const body = source.body_plain_text || source.body_text || source.body || source.body_html || "";
@@ -112,8 +117,8 @@ async function pollMailbox() {
     pageSize: 20
   });
   const messages = data.items || data.messages || [];
-  const messageIds = messages.map((message) => message.message_id || message.id).filter(Boolean);
-  const initializedKey = "mailbox-poll-initialized";
+  const messageIds = messages.map(getMailboxMessageId).filter(Boolean);
+  const initializedKey = "mailbox-poll-initialized-v2";
 
   if (!(await redis.exists(initializedKey))) {
     for (const messageId of messageIds) {
@@ -126,7 +131,7 @@ async function pollMailbox() {
 
   const processed = [];
   for (const message of messages.slice().reverse()) {
-    const messageId = message.message_id || message.id;
+    const messageId = getMailboxMessageId(message);
     if (!messageId || (await redis.exists(`polled-mail:${messageId}`))) continue;
     const fullMessage = await feishu.getMailboxMessage({
       userMailboxId: "me",
@@ -342,7 +347,7 @@ async function handleRecentMailboxMessages(res, query) {
       value && typeof value === "object" ? Object.keys(value) : typeof value
     ])),
     messages: messages.map((message) => ({
-      id: message.message_id || message.id || "",
+      id: getMailboxMessageId(message),
       subject: message.subject || "",
       receivedAt: message.received_time || message.sent_time || ""
     }))
