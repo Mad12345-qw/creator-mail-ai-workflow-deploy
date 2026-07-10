@@ -44,7 +44,7 @@ export function getConfig() {
       verificationToken: process.env.FEISHU_VERIFICATION_TOKEN || "",
       encryptKey: process.env.FEISHU_ENCRYPT_KEY || "",
       oauthRedirectUri: process.env.FEISHU_OAUTH_REDIRECT_URI || "",
-      oauthScopes: readList(process.env.FEISHU_OAUTH_SCOPES || "offline_access,mail:user_mailbox.message:readonly,mail:user_mailbox.message:send,mail:user_mailbox.folder:read"),
+      oauthScopes: readList(process.env.FEISHU_OAUTH_SCOPES || "offline_access,mail:user_mailbox.message:readonly,mail:user_mailbox.message:send,mail:user_mailbox.folder:read,mail:user_mailbox.message.subject:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.address:read"),
       senderMailboxId: process.env.FEISHU_SENDER_MAILBOX_ID || "",
       senderEmail: process.env.FEISHU_SENDER_EMAIL || "",
       mailUserId: process.env.FEISHU_MAIL_USER_ID || "",
