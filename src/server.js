@@ -71,7 +71,6 @@ const CLIENT_INTAKE_FIELDS = [
   { field_name: "禁止表达内容", type: 1 },
   { field_name: "标签与Hashtag", type: 1 },
   { field_name: "付款政策", type: 1 },
-  { field_name: "Agreement模板", type: 17 },
   { field_name: "项目负责人及备注", type: 1 }
 ];
 
