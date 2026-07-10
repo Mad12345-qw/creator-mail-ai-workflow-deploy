@@ -354,6 +354,42 @@ async function handleRecentMailboxMessages(res, query) {
   });
 }
 
+async function handleLatestTestMailboxMessage(res, query) {
+  if (!verifyCronToken(query)) {
+    return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
+  }
+  const userToken = await getUserToken();
+  if (!userToken) {
+    return sendJson(res, 409, { ok: false, error: "mailbox_owner_authorization_required" });
+  }
+  const data = await feishu.listMailboxMessages({
+    accessToken: userToken.accessToken,
+    folderId: config.feishu.inboxFolderId,
+    pageSize: 1
+  });
+  const messageId = getMailboxMessageId((data.items || data.messages || [])[0]);
+  if (!messageId) {
+    return sendJson(res, 404, { ok: false, error: "no_mailbox_message_found" });
+  }
+  const fullMessage = await feishu.getMailboxMessage({
+    userMailboxId: "me",
+    messageId,
+    accessToken: userToken.accessToken
+  });
+  const email = mapMailboxMessage(fullMessage, messageId);
+  if (!/^(MAIL EVENT TEST|POLLING TEST READY|POLLING FINAL CHECK)/i.test(email.subject || "")) {
+    return sendJson(res, 409, { ok: false, error: "latest_message_is_not_a_test_email" });
+  }
+  const result = await processCreatorEmail({ email, feishu, openai });
+  await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
+  return sendJson(res, 200, {
+    ok: true,
+    processed: true,
+    subject: email.subject,
+    action: result.action
+  });
+}
+
 async function handlePollEmail(req, res, query) {
   if (!verifyCronToken(query)) {
     return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
@@ -423,6 +459,10 @@ async function route(req, res) {
 
   if (req.method === "GET" && path === "/debug/mail/recent") {
     return handleRecentMailboxMessages(res, query);
+  }
+
+  if (req.method === "POST" && path === "/debug/mail/process-latest-test") {
+    return handleLatestTestMailboxMessage(res, query);
   }
 
   if ((req.method === "GET" || req.method === "POST") && path === "/jobs/poll-email") {
