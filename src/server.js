@@ -560,22 +560,6 @@ async function handlePollEmail(req, res, query) {
   return sendJson(res, 200, { ok: true, ...result });
 }
 
-async function handleSampleEmail(req, res) {
-  const body = await readJson(req);
-  const result = await processCreatorEmail({
-    email: {
-      messageId: body.messageId || `sample-${Date.now()}`,
-      from: body.from || "creator@example.com",
-      subject: body.subject || "Collaboration rate",
-      text: body.text || "Hi, please let me know your budget for one TikTok video."
-    },
-    feishu,
-    openai,
-    ruleStore
-  });
-  return sendJson(res, 200, { ok: true, result });
-}
-
 async function route(req, res) {
   const { path, query } = getPathAndQuery(req);
 
@@ -638,10 +622,6 @@ async function route(req, res) {
 
   if ((req.method === "GET" || req.method === "POST") && path === "/jobs/poll-email") {
     return handlePollEmail(req, res, query);
-  }
-
-  if (req.method === "POST" && path === "/debug/process-sample-email") {
-    return handleSampleEmail(req, res);
   }
 
   return sendJson(res, 404, { ok: false, error: "not_found" });
