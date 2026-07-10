@@ -146,6 +146,14 @@ export class FeishuClient {
     );
   }
 
+  async listMailboxFolders({ userMailboxId = "me", accessToken }) {
+    const mailbox = encodeURIComponent(userMailboxId || "me");
+    return this.requestWithUserToken(
+      `/mail/v1/user_mailboxes/${mailbox}/folders`,
+      accessToken
+    );
+  }
+
   async getMailboxMessage({ userMailboxId = "me", messageId, accessToken }) {
     const mailbox = encodeURIComponent(userMailboxId || "me");
     const message = encodeURIComponent(messageId);
