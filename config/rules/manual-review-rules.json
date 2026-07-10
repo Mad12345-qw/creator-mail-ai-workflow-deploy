@@ -4,7 +4,7 @@
     {
       "id": "paid-collaboration",
       "name": "Paid collaboration",
-      "match": ["rate card", "quote", "budget", "flat fee", "package fee", "hybrid", "payment terms"],
+      "match": ["rate card", "my rate", "rate is", "quote", "budget", "flat fee", "package fee", "hybrid", "payment terms"],
       "action": "manual_review",
       "notes": "All paid collaboration content must be reviewed before sending."
     },

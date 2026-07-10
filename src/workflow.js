@@ -115,7 +115,12 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
   const analysis = await openai.analyzeEmail(email, context);
   const intent = analysis.intent && analysis.intent !== "unconfigured" ? analysis.intent : fallbackIntent;
   const permittedActions = new Set(["no_reply", "record_only", "draft_reply", "manual_review"]);
-  const action = matchedRule?.action || (permittedActions.has(analysis.action) ? analysis.action : decideAction(intent));
+  const requiredAction = decideAction(intent);
+  const action = matchedRule?.action || (
+    requiredAction === "manual_review"
+      ? "manual_review"
+      : (permittedActions.has(analysis.action) ? analysis.action : requiredAction)
+  );
 
   const logFields = {
     "邮件ID": email.messageId || "",
@@ -152,6 +157,12 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     intent,
     action,
     creatorMatch: creator ? { recordId: creator.recordId, name: creator.name } : null,
+    projectMatches: projects.map((project) => ({
+      recordId: project.recordId,
+      brand: project.brand,
+      product: project.product,
+      campaign: project.campaign
+    })),
     matchedRule: matchedRule?.id || null,
     analysis,
     writeResult,

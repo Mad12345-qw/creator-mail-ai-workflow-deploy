@@ -316,4 +316,13 @@ export class FeishuClient {
       body: JSON.stringify({ fields })
     });
   }
+
+  async deleteBitableRecord(tableName, recordId) {
+    const appToken = this.config.bitable.appToken;
+    const tableId = await this.resolveBitableTableId(tableName);
+    if (!appToken || !tableId || !recordId) return { skipped: true };
+    return this.request(`/bitable/v1/apps/${appToken}/tables/${tableId}/records/${recordId}`, {
+      method: "DELETE"
+    });
+  }
 }
