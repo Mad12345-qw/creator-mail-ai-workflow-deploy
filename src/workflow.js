@@ -41,14 +41,72 @@ function findMatchingRule(email, rules) {
   return null;
 }
 
+function projectSummary(record) {
+  const fields = record.fields || {};
+  return {
+    recordId: record.record_id || "",
+    status: fields["项目状态"] || "",
+    brand: fields["品牌名称"] || "",
+    product: fields["产品名称"] || "",
+    campaign: fields["项目名称"] || "",
+    platforms: fields["推广平台"] || "",
+    markets: fields["目标市场"] || "",
+    productLink: fields["产品链接"] || "",
+    sampleLink: fields["样品申请链接"] || "",
+    description: fields["产品简介与核心卖点"] || "",
+    creatorFit: fields["适合达人与内容方向"] || "",
+    organicCommission: fields["自然流佣金"] || "",
+    paidTrafficCommission: fields["广告流佣金"] || "",
+    bonus: fields["Bonus机制"] || "",
+    flatFee: fields["Flat Fee支持"] || "",
+    affiliate: fields["支持纯佣"] || false,
+    hybrid: fields["支持Hybrid"] || false,
+    affiliateThreshold: fields["低报价转纯佣阈值N"] || "",
+    thresholdCurrency: fields["阈值币种"] || "",
+    samplePolicy: fields["样品政策"] || "",
+    deliverables: fields["默认交付要求"] || "",
+    adsAndSpark: fields["广告投流与Spark Ads要求"] || "",
+    adDuration: fields["广告授权期限"] || "",
+    usageRights: fields["内容使用权"] || "",
+    rawFootage: fields["原始素材要求"] || "",
+    postingTimeline: fields["发布时间要求"] || "",
+    requiredContent: fields["必须表达内容"] || "",
+    forbiddenContent: fields["禁止表达内容"] || "",
+    tags: fields["标签与Hashtag"] || "",
+    paymentPolicy: fields["付款政策"] || ""
+  };
+}
+
+async function findRelevantProjects(email, feishu) {
+  const data = await feishu.listBitableRecords("projectProducts", 100);
+  const active = (data.items || [])
+    .map(projectSummary)
+    .filter((project) => {
+      const status = String(project.status || "").toLowerCase();
+      return !status || ["priority", "active", "limited"].includes(status);
+    });
+  const emailText = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
+  const matched = active.filter((project) =>
+    [project.brand, project.product, project.campaign]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter((value) => value.length >= 2)
+      .some((value) => emailText.includes(value))
+  );
+  return (matched.length ? matched : active).slice(0, 3);
+}
+
 export async function processCreatorEmail({ email, feishu, openai, ruleStore }) {
   const fallbackIntent = inferIntent(email);
-  const creator = await feishu.findCreatorByEmail(email.from);
+  const [creator, projects] = await Promise.all([
+    feishu.findCreatorByEmail(email.from),
+    findRelevantProjects(email, feishu)
+  ]);
   const rules = ruleStore ? await ruleStore.load() : {};
   const matchedRule = findMatchingRule(email, rules);
   const context = {
-    note: "Creator data is read from the live Feishu creator table when a sender match exists.",
+    note: "Creator and project policy data are read from live Feishu tables. Use only supplied values.",
     creator: creator ? { name: creator.name, recordId: creator.recordId } : null,
+    projects,
     matchedRule: matchedRule ? { id: matchedRule.id, action: matchedRule.action, notes: matchedRule.notes } : null,
     fallbackIntent,
     fallbackAction: decideAction(fallbackIntent)
