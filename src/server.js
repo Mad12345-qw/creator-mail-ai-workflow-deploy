@@ -19,7 +19,7 @@ let lastOutbound = { status: "not_attempted" };
 let clientIntakeSetup = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "客户资料提交表";
-const CLIENT_INTAKE_VIEW_NAME = "客户资料填写表单";
+const CLIENT_INTAKE_VIEW_NAME = "客户资料填写表";
 const CLIENT_WIKI_URL = "https://zcn1ftnw54fl.feishu.cn/wiki/H0tkwIRmYiQ1wnks74Nc2m4kn5e";
 const CLIENT_INTAKE_FIELDS = [
   { field_name: "提交人 / 公司", type: 1 },
@@ -240,20 +240,20 @@ async function ensureClientIntakeTable() {
   }
 
   let viewId = "";
-  let formStatus = "ready";
+  let viewStatus = "ready";
   try {
     const viewsData = await feishu.listBitableViews(tableId, 100);
     let view = (viewsData.items || []).find((item) => String(item.view_name || item.name || "") === CLIENT_INTAKE_VIEW_NAME);
     if (!view) {
       const createdView = await feishu.createBitableView(tableId, {
         name: CLIENT_INTAKE_VIEW_NAME,
-        type: "form"
+        type: "grid"
       });
       view = createdView.view || createdView;
     }
     viewId = bitableItemId(view, "view");
   } catch (error) {
-    formStatus = `table_ready_form_view_failed: ${error.message}`;
+    viewStatus = `table_ready_grid_view_failed: ${error.message}`;
   }
 
   const tableUrl = `${CLIENT_WIKI_URL}?table=${encodeURIComponent(tableId)}${viewId ? `&view=${encodeURIComponent(viewId)}` : ""}`;
@@ -262,7 +262,7 @@ async function ensureClientIntakeTable() {
     tableId,
     viewId,
     tableUrl,
-    formStatus,
+    viewStatus,
     createdFields,
     error: ""
   });
