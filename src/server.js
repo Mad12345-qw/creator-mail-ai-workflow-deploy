@@ -12,6 +12,7 @@ const feishu = new FeishuClient(config);
 const openai = new OpenAIClient(config);
 const redis = new RedisStore(config);
 let lastMailboxEvent = { status: "not_received" };
+let lastMailboxPoll = { status: "not_started" };
 
 function verifyCronToken(query) {
   const expected = config.cronSecret;
@@ -92,12 +93,65 @@ function readAddress(value) {
 
 function mapMailboxMessage(message, fallbackMessageId) {
   const source = message.message || message;
+  const body = source.body_plain_text || source.body_text || source.body || source.body_html || "";
   return {
     messageId: source.message_id || source.id || fallbackMessageId,
     from: readAddress(source.from || source.sender || source.from_address),
     subject: source.subject || "",
-    text: source.body_plain_text || source.body_text || source.body || source.body_html || ""
+    text: typeof body === "string" ? body : body.plain_text || body.text || body.html || ""
   };
+}
+
+async function pollMailbox() {
+  const userToken = await getUserToken();
+  if (!userToken) return { status: "authorization_required" };
+
+  const data = await feishu.listMailboxMessages({
+    accessToken: userToken.accessToken,
+    folderId: config.feishu.inboxFolderId,
+    pageSize: 50
+  });
+  const messages = data.items || data.messages || [];
+  const messageIds = messages.map((message) => message.message_id || message.id).filter(Boolean);
+  const initializedKey = "mailbox-poll-initialized";
+
+  if (!(await redis.exists(initializedKey))) {
+    for (const messageId of messageIds) {
+      await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
+    }
+    await redis.set(initializedKey, new Date().toISOString());
+    lastMailboxPoll = { status: "baseline_created", seen: messageIds.length, updatedAt: new Date().toISOString() };
+    return lastMailboxPoll;
+  }
+
+  const processed = [];
+  for (const message of messages.slice().reverse()) {
+    const messageId = message.message_id || message.id;
+    if (!messageId || (await redis.exists(`polled-mail:${messageId}`))) continue;
+    const fullMessage = await feishu.getMailboxMessage({
+      userMailboxId: "me",
+      messageId,
+      accessToken: userToken.accessToken
+    });
+    await processCreatorEmail({
+      email: mapMailboxMessage(fullMessage, messageId),
+      feishu,
+      openai
+    });
+    await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
+    processed.push(messageId);
+  }
+  lastMailboxPoll = { status: "completed", processed: processed.length, updatedAt: new Date().toISOString() };
+  return lastMailboxPoll;
+}
+
+function scheduleMailboxPoll(reason) {
+  pollMailbox()
+    .then((result) => console.log(`Mailbox poll (${reason}):`, result.status, result.processed || result.seen || 0))
+    .catch((error) => {
+      lastMailboxPoll = { status: "failed", error: error.message, updatedAt: new Date().toISOString() };
+      console.error(`Mailbox poll (${reason}) failed:`, error.message);
+    });
 }
 
 async function processMailboxEvent(body) {
@@ -214,7 +268,11 @@ async function handleMailboxConnectionTest(res, query) {
   if (!userToken) {
     return sendJson(res, 409, { ok: false, error: "mailbox_owner_authorization_required" });
   }
-  const data = await feishu.listMailboxMessages({ accessToken: userToken.accessToken, pageSize: 1 });
+  const data = await feishu.listMailboxMessages({
+    accessToken: userToken.accessToken,
+    folderId: config.feishu.inboxFolderId,
+    pageSize: 1
+  });
   const items = data.items || data.messages || [];
   return sendJson(res, 200, {
     ok: true,
@@ -267,15 +325,8 @@ async function handlePollEmail(req, res, query) {
     return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
   }
 
-  return sendJson(res, 200, {
-    ok: true,
-    status: "poll_placeholder",
-    next: [
-      "Add Feishu/Gmail mailbox authorization.",
-      "Map provider message payloads to the workflow email shape.",
-      "Enable message-id dedupe persistence."
-    ]
-  });
+  const result = await pollMailbox();
+  return sendJson(res, 200, { ok: true, ...result });
 }
 
 async function handleSampleEmail(req, res) {
@@ -308,6 +359,7 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && path === "/cron/keepalive") {
+    scheduleMailboxPoll("keepalive");
     return sendText(res, 200, "ok");
   }
 
@@ -366,4 +418,6 @@ const server = createServer((req, res) => {
 
 server.listen(config.port, () => {
   console.log(`creator-mail-ai-workflow listening on ${config.port}`);
+  setTimeout(() => scheduleMailboxPoll("startup"), 3_000);
+  setInterval(() => scheduleMailboxPoll("interval"), 60_000).unref();
 });

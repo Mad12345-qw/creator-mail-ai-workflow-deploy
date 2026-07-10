@@ -138,10 +138,12 @@ export class FeishuClient {
     return data.data || data;
   }
 
-  async listMailboxMessages({ userMailboxId = "me", accessToken, pageSize = 1 }) {
+  async listMailboxMessages({ userMailboxId = "me", accessToken, folderId, pageSize = 1 }) {
     const mailbox = encodeURIComponent(userMailboxId || "me");
+    const query = new URLSearchParams({ page_size: String(pageSize) });
+    if (folderId) query.set("folder_id", folderId);
     return this.requestWithUserToken(
-      `/mail/v1/user_mailboxes/${mailbox}/messages?page_size=${pageSize}`,
+      `/mail/v1/user_mailboxes/${mailbox}/messages?${query.toString()}`,
       accessToken
     );
   }

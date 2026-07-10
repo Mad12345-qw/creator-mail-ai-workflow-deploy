@@ -47,7 +47,8 @@ export function getConfig() {
       oauthScopes: readList(process.env.FEISHU_OAUTH_SCOPES || "offline_access,mail:user_mailbox.message:readonly,mail:user_mailbox.message:send,mail:user_mailbox.folder:read"),
       senderMailboxId: process.env.FEISHU_SENDER_MAILBOX_ID || "",
       senderEmail: process.env.FEISHU_SENDER_EMAIL || "",
-      mailUserId: process.env.FEISHU_MAIL_USER_ID || ""
+      mailUserId: process.env.FEISHU_MAIL_USER_ID || "",
+      inboxFolderId: process.env.FEISHU_INBOX_FOLDER_ID || "INBOX"
     },
     mailProvider: process.env.MAIL_PROVIDER || "feishu",
     bitable: {

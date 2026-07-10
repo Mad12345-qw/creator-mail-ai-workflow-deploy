@@ -10,6 +10,7 @@
 - `GET /auth/feishu/start` 邮箱所有者授权入口
 - `GET /auth/feishu/callback` 飞书授权回调
 - `GET /debug/mail/connection` 受密钥保护的只读邮箱连通性检测
+- `POST /jobs/poll-email` 受密钥保护的收件箱轮询；首次执行仅建立历史邮件基线
 - `POST /jobs/poll-email` 定时拉取邮件入口
 - `POST /debug/process-sample-email` 本地样例邮件处理入口
 - Render 免费实例配置 `render.yaml`
