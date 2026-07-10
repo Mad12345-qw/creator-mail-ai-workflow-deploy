@@ -82,11 +82,12 @@ export class FeishuClient {
     return this.appToken;
   }
 
-  getAuthorizationUrl({ redirectUri, state }) {
+  getAuthorizationUrl({ redirectUri, state, scopes = [] }) {
     const url = new URL(`${FEISHU_BASE_URL}/authen/v1/authorize`);
     url.searchParams.set("app_id", this.config.feishu.appId);
     url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("state", state);
+    if (scopes.length) url.searchParams.set("scope", scopes.join(" "));
     return url.toString();
   }
 

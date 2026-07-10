@@ -34,6 +34,7 @@ http://localhost:8787/health
 
 - 飞书自建应用的 App ID / App Secret
 - 在飞书开放平台配置 `FEISHU_OAUTH_REDIRECT_URI` 对应的回调地址，并由邮箱所有者完成一次授权
+- 授权链接会显式请求 `offline_access`、邮箱读信和发送权限；应用权限变更后需重新授权一次
 - 飞书多维表格 app_token 和各数据表 table_id
 - DeepSeek 或 GPT 使用方式对应的服务端配置
 - `CRON_SECRET`

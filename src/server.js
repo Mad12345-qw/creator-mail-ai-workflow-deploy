@@ -154,7 +154,11 @@ async function handleFeishuAuthorizationStart(res) {
   }
   const state = randomUUID();
   await redis.set(`feishu-oauth-state:${state}`, "1", { ex: 600 });
-  return sendRedirect(res, feishu.getAuthorizationUrl({ redirectUri, state }));
+  return sendRedirect(res, feishu.getAuthorizationUrl({
+    redirectUri,
+    state,
+    scopes: config.feishu.oauthScopes
+  }));
 }
 
 async function handleFeishuAuthorizationCallback(res, query) {
