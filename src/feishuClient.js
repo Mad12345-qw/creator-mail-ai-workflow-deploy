@@ -7,6 +7,7 @@ export class FeishuClient {
     this.tenantTokenExpireAt = 0;
     this.appToken = "";
     this.appTokenExpireAt = 0;
+    this.tableIdCache = new Map();
   }
 
   isConfigured() {
@@ -184,12 +185,28 @@ export class FeishuClient {
 
   async listBitableRecords(tableName, pageSize = 100) {
     const appToken = this.config.bitable.appToken;
-    const tableId = this.config.bitable.tables[tableName];
+    const tableId = await this.resolveBitableTableId(tableName);
     if (!appToken || !tableId) return { skipped: true, items: [] };
     const data = await this.request(
       `/bitable/v1/apps/${appToken}/tables/${tableId}/records?page_size=${pageSize}`
     );
     return data.data || data;
+  }
+
+  async resolveBitableTableId(tableName) {
+    const configured = this.config.bitable.tables[tableName];
+    if (configured) return configured;
+    if (this.tableIdCache.has(tableName)) return this.tableIdCache.get(tableName);
+    const dynamicNames = {
+      projectProducts: "项目与产品插件库"
+    };
+    const expectedName = dynamicNames[tableName];
+    if (!expectedName) return "";
+    const data = await this.listBitableTables(100);
+    const table = (data.items || []).find((item) => String(item.name || "") === expectedName);
+    const tableId = table?.table_id || table?.id || "";
+    if (tableId) this.tableIdCache.set(tableName, tableId);
+    return tableId;
   }
 
   async listBitableTables(pageSize = 100) {
