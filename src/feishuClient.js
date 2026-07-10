@@ -192,6 +192,66 @@ export class FeishuClient {
     return data.data || data;
   }
 
+  async listBitableTables(pageSize = 100) {
+    const appToken = this.config.bitable.appToken;
+    if (!appToken) return { skipped: true, items: [] };
+    const data = await this.request(`/bitable/v1/apps/${appToken}/tables?page_size=${pageSize}`);
+    return data.data || data;
+  }
+
+  async createBitableTable({ name, defaultViewName = "全部提交" }) {
+    const appToken = this.config.bitable.appToken;
+    if (!appToken) throw new Error("BITABLE_APP_TOKEN is not configured.");
+    const data = await this.request(`/bitable/v1/apps/${appToken}/tables`, {
+      method: "POST",
+      body: JSON.stringify({
+        table: {
+          name,
+          default_view_name: defaultViewName
+        }
+      })
+    });
+    return data.data || data;
+  }
+
+  async listBitableFields(tableId, pageSize = 100) {
+    const appToken = this.config.bitable.appToken;
+    if (!appToken || !tableId) return { skipped: true, items: [] };
+    const data = await this.request(
+      `/bitable/v1/apps/${appToken}/tables/${tableId}/fields?page_size=${pageSize}`
+    );
+    return data.data || data;
+  }
+
+  async createBitableField(tableId, field) {
+    const appToken = this.config.bitable.appToken;
+    if (!appToken || !tableId) throw new Error("Bitable app token and table id are required.");
+    const data = await this.request(`/bitable/v1/apps/${appToken}/tables/${tableId}/fields`, {
+      method: "POST",
+      body: JSON.stringify(field)
+    });
+    return data.data || data;
+  }
+
+  async listBitableViews(tableId, pageSize = 100) {
+    const appToken = this.config.bitable.appToken;
+    if (!appToken || !tableId) return { skipped: true, items: [] };
+    const data = await this.request(
+      `/bitable/v1/apps/${appToken}/tables/${tableId}/views?page_size=${pageSize}`
+    );
+    return data.data || data;
+  }
+
+  async createBitableView(tableId, { name, type }) {
+    const appToken = this.config.bitable.appToken;
+    if (!appToken || !tableId) throw new Error("Bitable app token and table id are required.");
+    const data = await this.request(`/bitable/v1/apps/${appToken}/tables/${tableId}/views`, {
+      method: "POST",
+      body: JSON.stringify({ view_name: name, view_type: type })
+    });
+    return data.data || data;
+  }
+
   async updateBitableRecord(tableName, recordId, fields) {
     const appToken = this.config.bitable.appToken;
     const tableId = this.config.bitable.tables[tableName];

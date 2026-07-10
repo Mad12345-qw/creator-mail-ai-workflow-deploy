@@ -16,6 +16,33 @@ const ruleStore = new RuleStore(config);
 let lastMailboxEvent = { status: "not_received" };
 let lastMailboxPoll = { status: "not_started" };
 let lastOutbound = { status: "not_attempted" };
+let clientIntakeSetup = { status: "not_started" };
+
+const CLIENT_INTAKE_TABLE_NAME = "客户资料提交表";
+const CLIENT_INTAKE_VIEW_NAME = "客户资料填写表单";
+const CLIENT_WIKI_URL = "https://zcn1ftnw54fl.feishu.cn/wiki/H0tkwIRmYiQ1wnks74Nc2m4kn5e";
+const CLIENT_INTAKE_FIELDS = [
+  { field_name: "提交人 / 公司", type: 1 },
+  { field_name: "联系方式", type: 1 },
+  { field_name: "当前品牌 / 项目", type: 1 },
+  { field_name: "产品资料", type: 1 },
+  { field_name: "合作交付要求", type: 1 },
+  { field_name: "达人报价与客户目标价", type: 1 },
+  { field_name: "佣金 / Bonus / 坑位费策略", type: 1 },
+  { field_name: "不能直接答应的事项", type: 1 },
+  { field_name: "回复语气与语言", type: 1 },
+  { field_name: "邮件审批负责人", type: 1 },
+  { field_name: "合同确认负责人", type: 1 },
+  { field_name: "付款确认负责人", type: 1 },
+  { field_name: "样品与物流负责人", type: 1 },
+  { field_name: "公司签约主体与代表", type: 1 },
+  { field_name: "付款方式与结算条件", type: 1 },
+  { field_name: "优秀回复与砍价案例说明", type: 1 },
+  { field_name: "特殊规则或例外情况", type: 1 },
+  { field_name: "附件资料", type: 17 },
+  { field_name: "正式启用确认", type: 7 },
+  { field_name: "客户备注", type: 1 }
+];
 
 function verifyCronToken(query) {
   const expected = config.cronSecret;
@@ -169,6 +196,77 @@ async function recordOutbound(update) {
   } catch (error) {
     console.error("Could not persist outbound mail diagnostics:", error.message);
   }
+}
+
+function bitableItemId(item, kind) {
+  if (!item || typeof item !== "object") return "";
+  if (kind === "table") return item.table_id || item.id || "";
+  if (kind === "view") return item.view_id || item.id || "";
+  return item.field_id || item.id || "";
+}
+
+async function recordClientIntakeSetup(update) {
+  clientIntakeSetup = {
+    ...clientIntakeSetup,
+    ...update,
+    updatedAt: new Date().toISOString()
+  };
+  try {
+    await redis.setJson("client-intake-setup-v1", clientIntakeSetup, { ex: 60 * 60 * 24 * 30 });
+  } catch (error) {
+    console.error("Could not persist client intake setup:", error.message);
+  }
+}
+
+async function ensureClientIntakeTable() {
+  await recordClientIntakeSetup({ status: "checking", error: "" });
+  const tablesData = await feishu.listBitableTables(100);
+  const tables = tablesData.items || [];
+  let table = tables.find((item) => String(item.name || "") === CLIENT_INTAKE_TABLE_NAME);
+  if (!table) {
+    const created = await feishu.createBitableTable({ name: CLIENT_INTAKE_TABLE_NAME });
+    table = created.table || created;
+  }
+  const tableId = bitableItemId(table, "table");
+  if (!tableId) throw new Error("Feishu did not return the client intake table id.");
+
+  const fieldsData = await feishu.listBitableFields(tableId, 100);
+  const existingNames = new Set((fieldsData.items || []).map((item) => String(item.field_name || item.name || "")));
+  const createdFields = [];
+  for (const field of CLIENT_INTAKE_FIELDS) {
+    if (existingNames.has(field.field_name)) continue;
+    await feishu.createBitableField(tableId, field);
+    createdFields.push(field.field_name);
+  }
+
+  let viewId = "";
+  let formStatus = "ready";
+  try {
+    const viewsData = await feishu.listBitableViews(tableId, 100);
+    let view = (viewsData.items || []).find((item) => String(item.view_name || item.name || "") === CLIENT_INTAKE_VIEW_NAME);
+    if (!view) {
+      const createdView = await feishu.createBitableView(tableId, {
+        name: CLIENT_INTAKE_VIEW_NAME,
+        type: "form"
+      });
+      view = createdView.view || createdView;
+    }
+    viewId = bitableItemId(view, "view");
+  } catch (error) {
+    formStatus = `table_ready_form_view_failed: ${error.message}`;
+  }
+
+  const tableUrl = `${CLIENT_WIKI_URL}?table=${encodeURIComponent(tableId)}${viewId ? `&view=${encodeURIComponent(viewId)}` : ""}`;
+  await recordClientIntakeSetup({
+    status: "complete",
+    tableId,
+    viewId,
+    tableUrl,
+    formStatus,
+    createdFields,
+    error: ""
+  });
+  return clientIntakeSetup;
 }
 
 async function processApprovedTasks() {
@@ -572,6 +670,7 @@ async function route(req, res) {
       mailboxOAuthRedirectConfigured: Boolean(getOAuthRedirectUri()),
       outboundTracking: "enabled",
       publicSampleProcessing: false,
+      clientIntakeSetup,
       missingConfig: getMissingConfig(config)
     });
   }
@@ -649,5 +748,11 @@ const server = createServer((req, res) => {
 server.listen(config.port, () => {
   console.log(`creator-mail-ai-workflow listening on ${config.port}`);
   setTimeout(() => scheduleMailboxPoll("startup"), 3_000);
+  setTimeout(() => {
+    ensureClientIntakeTable().catch(async (error) => {
+      await recordClientIntakeSetup({ status: "failed", error: error.message });
+      console.error("Client intake setup failed:", error.message);
+    });
+  }, 5_000);
   setInterval(() => scheduleMailboxPoll("interval"), 60_000).unref();
 });
