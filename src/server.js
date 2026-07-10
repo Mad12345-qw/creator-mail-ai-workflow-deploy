@@ -109,7 +109,7 @@ async function pollMailbox() {
   const data = await feishu.listMailboxMessages({
     accessToken: userToken.accessToken,
     folderId: config.feishu.inboxFolderId,
-    pageSize: 50
+    pageSize: 20
   });
   const messages = data.items || data.messages || [];
   const messageIds = messages.map((message) => message.message_id || message.id).filter(Boolean);
