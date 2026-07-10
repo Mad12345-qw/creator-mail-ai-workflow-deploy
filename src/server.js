@@ -18,30 +18,61 @@ let lastMailboxPoll = { status: "not_started" };
 let lastOutbound = { status: "not_attempted" };
 let clientIntakeSetup = { status: "not_started" };
 
-const CLIENT_INTAKE_TABLE_NAME = "客户资料提交表";
-const CLIENT_INTAKE_VIEW_NAME = "客户资料填写表";
+const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
+const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
 const CLIENT_WIKI_URL = "https://zcn1ftnw54fl.feishu.cn/wiki/H0tkwIRmYiQ1wnks74Nc2m4kn5e";
 const CLIENT_INTAKE_FIELDS = [
-  { field_name: "提交人 / 公司", type: 1 },
-  { field_name: "联系方式", type: 1 },
-  { field_name: "当前品牌 / 项目", type: 1 },
-  { field_name: "产品资料", type: 1 },
-  { field_name: "合作交付要求", type: 1 },
-  { field_name: "达人报价与客户目标价", type: 1 },
-  { field_name: "佣金 / Bonus / 坑位费策略", type: 1 },
-  { field_name: "不能直接答应的事项", type: 1 },
-  { field_name: "回复语气与语言", type: 1 },
-  { field_name: "邮件审批负责人", type: 1 },
-  { field_name: "合同确认负责人", type: 1 },
-  { field_name: "付款确认负责人", type: 1 },
-  { field_name: "样品与物流负责人", type: 1 },
-  { field_name: "公司签约主体与代表", type: 1 },
-  { field_name: "付款方式与结算条件", type: 1 },
-  { field_name: "优秀回复与砍价案例说明", type: 1 },
-  { field_name: "特殊规则或例外情况", type: 1 },
-  { field_name: "附件资料", type: 17 },
-  { field_name: "正式启用确认", type: 7 },
-  { field_name: "客户备注", type: 1 }
+  {
+    field_name: "项目状态",
+    type: 3,
+    property: { options: ["Priority", "Active", "Limited", "Paused", "Closed", "Archived"].map((name) => ({ name })) }
+  },
+  { field_name: "品牌名称", type: 1 },
+  { field_name: "产品名称", type: 1 },
+  { field_name: "项目名称", type: 1 },
+  {
+    field_name: "推广平台",
+    type: 4,
+    property: { options: ["TikTok", "Instagram", "YouTube", "X"].map((name) => ({ name })) }
+  },
+  { field_name: "目标市场", type: 1 },
+  { field_name: "产品链接", type: 15 },
+  { field_name: "样品申请链接", type: 15 },
+  { field_name: "产品简介与核心卖点", type: 1 },
+  { field_name: "适合达人与内容方向", type: 1 },
+  { field_name: "自然流佣金", type: 1 },
+  { field_name: "广告流佣金", type: 1 },
+  { field_name: "Bonus机制", type: 1 },
+  {
+    field_name: "Flat Fee支持",
+    type: 3,
+    property: { options: ["Yes", "No", "Conditional"].map((name) => ({ name })) }
+  },
+  { field_name: "支持纯佣", type: 7 },
+  { field_name: "支持Hybrid", type: 7 },
+  { field_name: "低报价转纯佣阈值N", type: 2 },
+  {
+    field_name: "阈值币种",
+    type: 3,
+    property: { options: ["USD", "EUR", "GBP", "CNY", "Other"].map((name) => ({ name })) }
+  },
+  {
+    field_name: "样品政策",
+    type: 3,
+    property: { options: ["Yes", "No", "Limited"].map((name) => ({ name })) }
+  },
+  { field_name: "默认交付要求", type: 1 },
+  { field_name: "广告投流与Spark Ads要求", type: 1 },
+  { field_name: "广告授权期限", type: 1 },
+  { field_name: "内容使用权", type: 1 },
+  { field_name: "原始素材要求", type: 1 },
+  { field_name: "发布时间要求", type: 1 },
+  { field_name: "必须表达内容", type: 1 },
+  { field_name: "禁止表达内容", type: 1 },
+  { field_name: "标签与Hashtag", type: 1 },
+  { field_name: "付款政策", type: 1 },
+  { field_name: "Agreement模板", type: 17 },
+  { field_name: "项目负责人及备注", type: 1 }
 ];
 
 function verifyCronToken(query) {

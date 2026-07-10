@@ -209,7 +209,7 @@ export class FeishuClient {
           name,
           default_view_name: defaultViewName,
           fields: [
-            { field_name: "提交人 / 公司", type: 1 }
+            { field_name: "项目ID", type: 1 }
           ]
         }
       })
