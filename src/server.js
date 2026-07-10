@@ -389,6 +389,28 @@ async function handleLatestTestMailboxMessage(res, query) {
   return sendJson(res, 404, { ok: false, error: "no_test_email_found_in_recent_messages" });
 }
 
+async function handleMailboxMessageShape(res, query) {
+  if (!verifyCronToken(query)) {
+    return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
+  }
+  const userToken = await getUserToken();
+  if (!userToken) {
+    return sendJson(res, 409, { ok: false, error: "mailbox_owner_authorization_required" });
+  }
+  const data = await feishu.listMailboxMessages({
+    accessToken: userToken.accessToken,
+    folderId: config.feishu.inboxFolderId,
+    pageSize: 1
+  });
+  const messageId = getMailboxMessageId((data.items || data.messages || [])[0]);
+  const fullMessage = await feishu.getMailboxMessage({ userMailboxId: "me", messageId, accessToken: userToken.accessToken });
+  const describe = (value) => Object.fromEntries(Object.entries(value || {}).map(([key, item]) => [
+    key,
+    item && typeof item === "object" && !Array.isArray(item) ? Object.keys(item) : typeof item
+  ]));
+  return sendJson(res, 200, { ok: true, root: describe(fullMessage), message: describe(fullMessage.message) });
+}
+
 async function handlePollEmail(req, res, query) {
   if (!verifyCronToken(query)) {
     return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
@@ -462,6 +484,10 @@ async function route(req, res) {
 
   if (req.method === "POST" && path === "/debug/mail/process-latest-test") {
     return handleLatestTestMailboxMessage(res, query);
+  }
+
+  if (req.method === "GET" && path === "/debug/mail/message-shape") {
+    return handleMailboxMessageShape(res, query);
   }
 
   if ((req.method === "GET" || req.method === "POST") && path === "/jobs/poll-email") {
