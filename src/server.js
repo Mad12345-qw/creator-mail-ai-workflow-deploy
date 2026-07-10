@@ -150,9 +150,79 @@ async function pollMailbox() {
   return lastMailboxPoll;
 }
 
+function isChecked(value) {
+  return value === true || value === 1 || String(value).toLowerCase() === "true";
+}
+
+async function processApprovedTasks() {
+  const tasksData = await feishu.listBitableRecords("approvalTasks", 100);
+  const candidates = (tasksData.items || []).filter((task) => {
+    const fields = task.fields || {};
+    const status = String(fields["任务状态"] || "");
+    return isChecked(fields["是否允许发送"]) && !["已发送", "发送失败"].includes(status);
+  });
+  if (!candidates.length) return { checked: 0, sent: 0, safeModeSkipped: 0 };
+
+  const logsData = await feishu.listBitableRecords("emailLog", 100);
+  const logsByMessageId = new Map(
+    (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record])
+  );
+  const userToken = await getUserToken();
+  if (!userToken) throw new Error("Mailbox owner authorization is required before sending approved mail.");
+
+  let sent = 0;
+  let safeModeSkipped = 0;
+  for (const task of candidates) {
+    const fields = task.fields || {};
+    const messageId = String(fields["关联邮件ID"] || "");
+    const emailLog = logsByMessageId.get(messageId);
+    const recipient = String(emailLog?.fields?.["发件人邮箱"] || "").trim();
+    const draft = String(fields["人工修改稿"] || fields["AI草稿"] || emailLog?.fields?.["AI草稿"] || "").trim();
+    if (!recipient || !draft) {
+      await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "发送资料不完整" });
+      continue;
+    }
+    const recipientAllowed = config.testRecipients.includes(recipient.toLowerCase());
+    if (config.safeTestMode && !recipientAllowed) {
+      safeModeSkipped += 1;
+      continue;
+    }
+    const originalSubject = String(emailLog?.fields?.["邮件主题"] || "");
+    const subject = /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`;
+    const result = await feishu.sendMailboxMessage({
+      accessToken: userToken.accessToken,
+      to: recipient,
+      subject,
+      bodyPlainText: draft,
+      dedupeKey: `approval-${task.record_id}-${messageId}`
+    });
+    await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "已发送" });
+    if (emailLog?.record_id) {
+      await feishu.updateBitableRecord("emailLog", emailLog.record_id, { "处理状态": "已发送" });
+    }
+    await feishu.createBitableRecord("actionLogs", {
+      "事件类型": "approved_mail_sent",
+      "事件来源": "approval_task",
+      "操作内容": subject,
+      "操作结果": result.message_id || "sent",
+      "错误信息": "",
+      "关联邮件ID": messageId
+    });
+    sent += 1;
+  }
+  return { checked: candidates.length, sent, safeModeSkipped };
+}
+
+async function runMailboxWork(reason) {
+  const poll = await pollMailbox();
+  const approvals = await processApprovedTasks();
+  console.log(`Mailbox work (${reason}):`, poll.status, approvals.sent);
+  return { poll, approvals };
+}
+
 function scheduleMailboxPoll(reason) {
-  pollMailbox()
-    .then((result) => console.log(`Mailbox poll (${reason}):`, result.status, result.processed || result.seen || 0))
+  runMailboxWork(reason)
+    .then((result) => console.log(`Mailbox work complete (${reason}):`, result.poll.processed || result.poll.seen || 0))
     .catch((error) => {
       lastMailboxPoll = { status: "failed", error: error.message, updatedAt: new Date().toISOString() };
       console.error(`Mailbox poll (${reason}) failed:`, error.message);
@@ -416,7 +486,7 @@ async function handlePollEmail(req, res, query) {
     return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
   }
 
-  const result = await pollMailbox();
+  const result = await runMailboxWork("manual");
   return sendJson(res, 200, { ok: true, ...result });
 }
 

@@ -165,6 +165,62 @@ export class FeishuClient {
     );
   }
 
+  async sendMailboxMessage({ userMailboxId = "me", accessToken, to, subject, bodyPlainText, dedupeKey }) {
+    const mailbox = encodeURIComponent(userMailboxId || "me");
+    return this.requestWithUserToken(
+      `/mail/v1/user_mailboxes/${mailbox}/messages/send`,
+      accessToken,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          subject,
+          to: [{ mail_address: to }],
+          body_plain_text: bodyPlainText,
+          dedupe_key: dedupeKey
+        })
+      }
+    );
+  }
+
+  async listBitableRecords(tableName, pageSize = 100) {
+    const appToken = this.config.bitable.appToken;
+    const tableId = this.config.bitable.tables[tableName];
+    if (!appToken || !tableId) return { skipped: true, items: [] };
+    const data = await this.request(
+      `/bitable/v1/apps/${appToken}/tables/${tableId}/records?page_size=${pageSize}`
+    );
+    return data.data || data;
+  }
+
+  async updateBitableRecord(tableName, recordId, fields) {
+    const appToken = this.config.bitable.appToken;
+    const tableId = this.config.bitable.tables[tableName];
+    if (!appToken || !tableId || !recordId) return { skipped: true };
+    return this.request(`/bitable/v1/apps/${appToken}/tables/${tableId}/records/${recordId}`, {
+      method: "PUT",
+      body: JSON.stringify({ fields })
+    });
+  }
+
+  async findCreatorByEmail(email) {
+    const normalized = String(email || "").trim().toLowerCase();
+    if (!normalized) return null;
+    const data = await this.listBitableRecords("creators", 100);
+    for (const record of data.items || []) {
+      const fields = record.fields || {};
+      const values = [fields["联系方式"], fields["邮箱"], fields["Email"], fields["邮箱地址"]]
+        .filter((value) => value !== undefined && value !== null)
+        .map((value) => JSON.stringify(value).toLowerCase());
+      if (!values.some((value) => value.includes(normalized))) continue;
+      return {
+        recordId: record.record_id,
+        name: String(fields["达人昵称"] || fields["达人名称"] || normalized),
+        fields
+      };
+    }
+    return null;
+  }
+
   async createBitableRecord(tableName, fields) {
     const appToken = this.config.bitable.appToken;
     const tableId = this.config.bitable.tables[tableName];

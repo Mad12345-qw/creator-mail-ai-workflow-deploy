@@ -30,17 +30,18 @@ function decideAction(intent) {
 
 export async function processCreatorEmail({ email, feishu, openai }) {
   const fallbackIntent = inferIntent(email);
+  const creator = await feishu.findCreatorByEmail(email.from);
   const context = {
-    note: "Dynamic Feishu project/rule tables are not connected yet.",
+    note: "Creator data is read from the live Feishu creator table when a sender match exists.",
+    creator: creator ? { name: creator.name, recordId: creator.recordId } : null,
     fallbackIntent,
     fallbackAction: decideAction(fallbackIntent)
   };
 
   const analysis = await openai.analyzeEmail(email, context);
   const intent = analysis.intent && analysis.intent !== "unconfigured" ? analysis.intent : fallbackIntent;
-  const action = analysis.action && analysis.action !== "manual_review"
-    ? analysis.action
-    : decideAction(intent);
+  const permittedActions = new Set(["no_reply", "record_only", "draft_reply", "manual_review"]);
+  const action = permittedActions.has(analysis.action) ? analysis.action : decideAction(intent);
 
   const logFields = {
     "邮件ID": email.messageId || "",
@@ -51,7 +52,7 @@ export async function processCreatorEmail({ email, feishu, openai }) {
     "处理动作": action,
     "AI摘要": analysis.summary || "",
     "AI草稿": analysis.draftReply || "",
-    "关联达人": "",
+    "关联达人": creator?.name || "",
     "处理状态": action === "manual_review" ? "待人工确认" : "已记录"
   };
 
@@ -76,6 +77,7 @@ export async function processCreatorEmail({ email, feishu, openai }) {
   return {
     intent,
     action,
+    creatorMatch: creator ? { recordId: creator.recordId, name: creator.name } : null,
     analysis,
     writeResult,
     approvalResult
