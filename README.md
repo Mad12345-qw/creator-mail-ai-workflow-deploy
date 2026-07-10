@@ -7,6 +7,9 @@
 - `GET /health` 健康检查
 - `GET /cron/keepalive` 给 cron-job.org 保活使用
 - `POST /webhook/feishu` 飞书事件入口
+- `GET /auth/feishu/start` 邮箱所有者授权入口
+- `GET /auth/feishu/callback` 飞书授权回调
+- `GET /debug/mail/connection` 受密钥保护的只读邮箱连通性检测
 - `POST /jobs/poll-email` 定时拉取邮件入口
 - `POST /debug/process-sample-email` 本地样例邮件处理入口
 - Render 免费实例配置 `render.yaml`
@@ -30,7 +33,7 @@ http://localhost:8787/health
 ## Render 上线前必须补齐
 
 - 飞书自建应用的 App ID / App Secret
-- 邮箱收发授权信息
+- 在飞书开放平台配置 `FEISHU_OAUTH_REDIRECT_URI` 对应的回调地址，并由邮箱所有者完成一次授权
 - 飞书多维表格 app_token 和各数据表 table_id
 - DeepSeek 或 GPT 使用方式对应的服务端配置
 - `CRON_SECRET`

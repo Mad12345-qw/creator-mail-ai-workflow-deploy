@@ -1,9 +1,10 @@
 import { createServer } from "node:http";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { getConfig, getMissingConfig } from "./config.js";
 import { FeishuClient } from "./feishuClient.js";
 import { OpenAIClient } from "./openaiClient.js";
 import { RedisStore } from "./redisStore.js";
-import { getPathAndQuery, readJson, sendJson, sendText } from "./http.js";
+import { getPathAndQuery, readJson, sendJson, sendRedirect, sendText } from "./http.js";
 import { processCreatorEmail } from "./workflow.js";
 
 const config = getConfig();
@@ -16,19 +17,173 @@ function verifyCronToken(query) {
   return expected && query.get("token") === expected;
 }
 
+function getOAuthRedirectUri() {
+  return config.feishu.oauthRedirectUri || (config.baseUrl ? `${config.baseUrl.replace(/\/$/, "")}/auth/feishu/callback` : "");
+}
+
+function getTokenCipherKey() {
+  return createHash("sha256")
+    .update(`${config.feishu.appId}:${config.feishu.appSecret}`)
+    .digest();
+}
+
+function encryptTokenRecord(record) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", getTokenCipherKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(record), "utf8"), cipher.final()]);
+  return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), ciphertext.toString("base64url")].join(".");
+}
+
+function decryptTokenRecord(value) {
+  const [version, iv, tag, ciphertext] = String(value || "").split(".");
+  if (version !== "v1" || !iv || !tag || !ciphertext) return null;
+  const decipher = createDecipheriv("aes-256-gcm", getTokenCipherKey(), Buffer.from(iv, "base64url"));
+  decipher.setAuthTag(Buffer.from(tag, "base64url"));
+  const plaintext = Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]);
+  return JSON.parse(plaintext.toString("utf8"));
+}
+
+async function saveUserToken(tokenData) {
+  const record = {
+    accessToken: tokenData.access_token,
+    refreshToken: tokenData.refresh_token,
+    expiresAt: Date.now() + Number(tokenData.expires_in || 7200) * 1000,
+    refreshExpiresAt: Date.now() + Number(tokenData.refresh_expires_in || 0) * 1000,
+    userId: tokenData.user_id || tokenData.open_id || "",
+    updatedAt: new Date().toISOString()
+  };
+  await redis.set("feishu-mail-user-token", encryptTokenRecord(record));
+  return record;
+}
+
+async function getUserToken() {
+  const stored = await redis.get("feishu-mail-user-token");
+  const record = decryptTokenRecord(stored);
+  if (!record || !record.accessToken) return null;
+  if (Date.now() < record.expiresAt - 60_000) return record;
+  if (!record.refreshToken || (record.refreshExpiresAt && Date.now() >= record.refreshExpiresAt - 60_000)) {
+    return null;
+  }
+  const refreshed = await feishu.refreshUserAccessToken(record.refreshToken);
+  return saveUserToken({ ...refreshed, user_id: refreshed.user_id || record.userId });
+}
+
+function eventValue(event, names) {
+  if (!event || typeof event !== "object") return "";
+  for (const name of names) {
+    if (typeof event[name] === "string" && event[name]) return event[name];
+  }
+  for (const value of Object.values(event)) {
+    if (value && typeof value === "object") {
+      const nested = eventValue(value, names);
+      if (nested) return nested;
+    }
+  }
+  return "";
+}
+
+function readAddress(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return readAddress(value[0]);
+  if (value && typeof value === "object") return value.mail_address || value.address || value.email || "";
+  return "";
+}
+
+function mapMailboxMessage(message, fallbackMessageId) {
+  const source = message.message || message;
+  return {
+    messageId: source.message_id || source.id || fallbackMessageId,
+    from: readAddress(source.from || source.sender || source.from_address),
+    subject: source.subject || "",
+    text: source.body_plain_text || source.body_text || source.body || source.body_html || ""
+  };
+}
+
+async function processMailboxEvent(body) {
+  const event = body.event || body;
+  const eventId = body.header?.event_id || body.event_id || eventValue(event, ["event_id"]);
+  const messageId = eventValue(event, ["message_id", "mail_message_id"]);
+  const mailboxId = eventValue(event, ["user_mailbox_id", "mailbox_id"]) || "me";
+  if (!messageId) {
+    console.warn("Feishu mail event did not include a message id.");
+    return;
+  }
+  const dedupeKey = `mail-event:${eventId || messageId}`;
+  if (await redis.exists(dedupeKey)) return;
+  await redis.set(dedupeKey, "1", { ex: 60 * 60 * 24 * 30 });
+
+  const userToken = await getUserToken();
+  if (!userToken) {
+    throw new Error("Mailbox owner authorization is required before processing mail events.");
+  }
+  const message = await feishu.getMailboxMessage({
+    userMailboxId: mailboxId,
+    messageId,
+    accessToken: userToken.accessToken
+  });
+  await processCreatorEmail({
+    email: mapMailboxMessage(message, messageId),
+    feishu,
+    openai
+  });
+}
+
 async function handleFeishuWebhook(req, res) {
   const body = await readJson(req);
   if (body.challenge) {
     return sendJson(res, 200, { challenge: body.challenge });
   }
-  if (config.feishu.verificationToken && body.token && body.token !== config.feishu.verificationToken) {
+  const token = body.token || body.header?.token;
+  if (config.feishu.verificationToken && token && token !== config.feishu.verificationToken) {
     return sendJson(res, 401, { ok: false, error: "invalid_feishu_token" });
   }
+  sendJson(res, 200, { ok: true, received: true });
+  const eventType = body.header?.event_type || body.type || "";
+  if (eventType.includes("user_mailbox") || eventValue(body.event || body, ["message_id", "mail_message_id"])) {
+    processMailboxEvent(body).catch((error) => console.error("Feishu mailbox event failed:", error.message));
+  }
+}
 
+async function handleFeishuAuthorizationStart(res) {
+  if (!redis.isConfigured()) {
+    return sendJson(res, 503, { ok: false, error: "redis_required_for_mailbox_authorization" });
+  }
+  const redirectUri = getOAuthRedirectUri();
+  if (!redirectUri) {
+    return sendJson(res, 503, { ok: false, error: "missing_feishu_oauth_redirect_uri" });
+  }
+  const state = randomUUID();
+  await redis.set(`feishu-oauth-state:${state}`, "1", { ex: 600 });
+  return sendRedirect(res, feishu.getAuthorizationUrl({ redirectUri, state }));
+}
+
+async function handleFeishuAuthorizationCallback(res, query) {
+  const code = query.get("code");
+  const state = query.get("state");
+  if (!code || !state || !(await redis.exists(`feishu-oauth-state:${state}`))) {
+    return sendJson(res, 400, { ok: false, error: "invalid_or_expired_oauth_state" });
+  }
+  await redis.del(`feishu-oauth-state:${state}`);
+  const tokenData = await feishu.exchangeAuthorizationCode(code);
+  const record = await saveUserToken(tokenData);
+  return sendText(res, 200, `Feishu mailbox authorization completed for ${record.userId || "the selected mailbox"}. You can close this page.`);
+}
+
+async function handleMailboxConnectionTest(res, query) {
+  if (!verifyCronToken(query)) {
+    return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
+  }
+  const userToken = await getUserToken();
+  if (!userToken) {
+    return sendJson(res, 409, { ok: false, error: "mailbox_owner_authorization_required" });
+  }
+  const data = await feishu.listMailboxMessages({ accessToken: userToken.accessToken, pageSize: 1 });
+  const items = data.items || data.messages || [];
   return sendJson(res, 200, {
     ok: true,
-    received: true,
-    next: "Connect mailbox event mapping after Feishu email authorization is ready."
+    connected: true,
+    mailboxProbe: "read_only",
+    messagesVisible: Array.isArray(items) ? items.length : 0
   });
 }
 
@@ -72,6 +227,7 @@ async function route(req, res) {
       service: "creator-mail-ai-workflow",
       safeTestMode: config.safeTestMode,
       redisConfigured: redis.isConfigured(),
+      mailboxOAuthRedirectConfigured: Boolean(getOAuthRedirectUri()),
       missingConfig: getMissingConfig(config)
     });
   }
@@ -82,6 +238,18 @@ async function route(req, res) {
 
   if (req.method === "POST" && path === "/webhook/feishu") {
     return handleFeishuWebhook(req, res);
+  }
+
+  if (req.method === "GET" && path === "/auth/feishu/start") {
+    return handleFeishuAuthorizationStart(res);
+  }
+
+  if (req.method === "GET" && path === "/auth/feishu/callback") {
+    return handleFeishuAuthorizationCallback(res, query);
+  }
+
+  if (req.method === "GET" && path === "/debug/mail/connection") {
+    return handleMailboxConnectionTest(res, query);
   }
 
   if ((req.method === "GET" || req.method === "POST") && path === "/jobs/poll-email") {

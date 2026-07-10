@@ -43,6 +43,7 @@ export function getConfig() {
       appSecret: process.env.FEISHU_APP_SECRET || "",
       verificationToken: process.env.FEISHU_VERIFICATION_TOKEN || "",
       encryptKey: process.env.FEISHU_ENCRYPT_KEY || "",
+      oauthRedirectUri: process.env.FEISHU_OAUTH_REDIRECT_URI || "",
       senderMailboxId: process.env.FEISHU_SENDER_MAILBOX_ID || "",
       senderEmail: process.env.FEISHU_SENDER_EMAIL || "",
       mailUserId: process.env.FEISHU_MAIL_USER_ID || ""

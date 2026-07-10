@@ -23,6 +23,14 @@ export function sendText(res, status, text) {
   res.end(text);
 }
 
+export function sendRedirect(res, location) {
+  res.writeHead(302, {
+    location,
+    "cache-control": "no-store"
+  });
+  res.end();
+}
+
 export function getPathAndQuery(req) {
   const url = new URL(req.url, "http://localhost");
   return { path: url.pathname, query: url.searchParams };
