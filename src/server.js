@@ -365,29 +365,28 @@ async function handleLatestTestMailboxMessage(res, query) {
   const data = await feishu.listMailboxMessages({
     accessToken: userToken.accessToken,
     folderId: config.feishu.inboxFolderId,
-    pageSize: 1
+    pageSize: 20
   });
-  const messageId = getMailboxMessageId((data.items || data.messages || [])[0]);
-  if (!messageId) {
-    return sendJson(res, 404, { ok: false, error: "no_mailbox_message_found" });
+  for (const item of data.items || data.messages || []) {
+    const messageId = getMailboxMessageId(item);
+    if (!messageId) continue;
+    const fullMessage = await feishu.getMailboxMessage({
+      userMailboxId: "me",
+      messageId,
+      accessToken: userToken.accessToken
+    });
+    const email = mapMailboxMessage(fullMessage, messageId);
+    if (!/^(MAIL EVENT TEST|POLLING TEST READY|POLLING FINAL CHECK)/i.test(email.subject || "")) continue;
+    const result = await processCreatorEmail({ email, feishu, openai });
+    await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
+    return sendJson(res, 200, {
+      ok: true,
+      processed: true,
+      subject: email.subject,
+      action: result.action
+    });
   }
-  const fullMessage = await feishu.getMailboxMessage({
-    userMailboxId: "me",
-    messageId,
-    accessToken: userToken.accessToken
-  });
-  const email = mapMailboxMessage(fullMessage, messageId);
-  if (!/^(MAIL EVENT TEST|POLLING TEST READY|POLLING FINAL CHECK)/i.test(email.subject || "")) {
-    return sendJson(res, 409, { ok: false, error: "latest_message_is_not_a_test_email" });
-  }
-  const result = await processCreatorEmail({ email, feishu, openai });
-  await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
-  return sendJson(res, 200, {
-    ok: true,
-    processed: true,
-    subject: email.subject,
-    action: result.action
-  });
+  return sendJson(res, 404, { ok: false, error: "no_test_email_found_in_recent_messages" });
 }
 
 async function handlePollEmail(req, res, query) {
