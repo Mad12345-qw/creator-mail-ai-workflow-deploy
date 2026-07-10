@@ -15,6 +15,7 @@ const redis = new RedisStore(config);
 const ruleStore = new RuleStore(config);
 let lastMailboxEvent = { status: "not_received" };
 let lastMailboxPoll = { status: "not_started" };
+let lastOutbound = { status: "not_attempted" };
 
 function verifyCronToken(query) {
   const expected = config.cronSecret;
@@ -157,6 +158,19 @@ function isChecked(value) {
   return value === true || value === 1 || String(value).toLowerCase() === "true";
 }
 
+async function recordOutbound(update) {
+  lastOutbound = {
+    ...lastOutbound,
+    ...update,
+    updatedAt: new Date().toISOString()
+  };
+  try {
+    await redis.setJson("last-mail-outbound", lastOutbound, { ex: 60 * 60 * 24 * 7 });
+  } catch (error) {
+    console.error("Could not persist outbound mail diagnostics:", error.message);
+  }
+}
+
 async function processApprovedTasks() {
   const tasksData = await feishu.listBitableRecords("approvalTasks", 100);
   const candidates = (tasksData.items || []).filter((task) => {
@@ -188,16 +202,46 @@ async function processApprovedTasks() {
     const recipientAllowed = config.testRecipients.includes(recipient.toLowerCase());
     if (config.safeTestMode && !recipientAllowed) {
       safeModeSkipped += 1;
+      await recordOutbound({
+        status: "blocked_by_safe_test_mode",
+        recipient,
+        messageId,
+        apiAccepted: false,
+        error: "Recipient is not in TEST_RECIPIENTS while SAFE_TEST_MODE is enabled."
+      });
       continue;
     }
     const originalSubject = String(emailLog?.fields?.["邮件主题"] || "");
     const subject = /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`;
-    const result = await feishu.sendMailboxMessage({
-      accessToken: userToken.accessToken,
-      to: recipient,
+    await recordOutbound({ status: "sending", recipient, subject, messageId, apiAccepted: false, error: "" });
+    let result;
+    try {
+      result = await feishu.sendMailboxMessage({
+        accessToken: userToken.accessToken,
+        to: recipient,
+        subject,
+        bodyPlainText: draft,
+        dedupeKey: `approval-${task.record_id}-${messageId}`
+      });
+    } catch (error) {
+      await recordOutbound({
+        status: "api_failed",
+        recipient,
+        subject,
+        messageId,
+        apiAccepted: false,
+        error: error.message
+      });
+      throw error;
+    }
+    await recordOutbound({
+      status: "api_accepted",
+      recipient,
       subject,
-      bodyPlainText: draft,
-      dedupeKey: `approval-${task.record_id}-${messageId}`
+      messageId,
+      apiAccepted: true,
+      providerMessageId: result.message_id || "",
+      error: ""
     });
     await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "已发送" });
     if (emailLog?.record_id) {
@@ -379,6 +423,28 @@ async function handleMailboxEventStatus(res, query) {
   });
 }
 
+async function handleMailboxOutboundStatus(res, query) {
+  if (!verifyCronToken(query)) {
+    return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
+  }
+  const stored = await redis.getJson("last-mail-outbound");
+  const outbound = stored || lastOutbound;
+  return sendJson(res, 200, {
+    ok: true,
+    outbound: {
+      status: outbound.status || "not_attempted",
+      recipient: outbound.recipient || "",
+      subject: outbound.subject || "",
+      messageId: outbound.messageId || "",
+      providerMessageId: outbound.providerMessageId || "",
+      apiAccepted: Boolean(outbound.apiAccepted),
+      updatedAt: outbound.updatedAt || "",
+      error: outbound.error || ""
+    },
+    deliveryConfirmation: "The Feishu send API confirms acceptance only; recipient mailbox delivery must be verified in the sender's Sent folder or recipient mailbox."
+  });
+}
+
 async function handleMailboxFolders(res, query) {
   if (!verifyCronToken(query)) {
     return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
@@ -520,6 +586,7 @@ async function route(req, res) {
       safeTestMode: config.safeTestMode,
       redisConfigured: redis.isConfigured(),
       mailboxOAuthRedirectConfigured: Boolean(getOAuthRedirectUri()),
+      outboundTracking: "enabled",
       missingConfig: getMissingConfig(config)
     });
   }
@@ -547,6 +614,10 @@ async function route(req, res) {
 
   if (req.method === "GET" && path === "/debug/mail/event-status") {
     return handleMailboxEventStatus(res, query);
+  }
+
+  if (req.method === "GET" && path === "/debug/mail/outbound-status") {
+    return handleMailboxOutboundStatus(res, query);
   }
 
   if (req.method === "GET" && path === "/debug/mail/folders") {
