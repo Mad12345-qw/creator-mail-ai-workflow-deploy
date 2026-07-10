@@ -11,6 +11,7 @@ const config = getConfig();
 const feishu = new FeishuClient(config);
 const openai = new OpenAIClient(config);
 const redis = new RedisStore(config);
+let lastMailboxEvent = { status: "not_received" };
 
 function verifyCronToken(query) {
   const expected = config.cronSecret;
@@ -128,6 +129,19 @@ async function processMailboxEvent(body) {
   });
 }
 
+async function recordMailboxEvent(update) {
+  lastMailboxEvent = {
+    ...lastMailboxEvent,
+    ...update,
+    updatedAt: new Date().toISOString()
+  };
+  try {
+    await redis.setJson("last-mailbox-event", lastMailboxEvent, { ex: 60 * 60 * 24 * 7 });
+  } catch (error) {
+    console.error("Could not persist mailbox event diagnostics:", error.message);
+  }
+}
+
 async function handleFeishuWebhook(req, res) {
   const body = await readJson(req);
   if (body.challenge) {
@@ -140,7 +154,19 @@ async function handleFeishuWebhook(req, res) {
   sendJson(res, 200, { ok: true, received: true });
   const eventType = body.header?.event_type || body.type || "";
   if (eventType.includes("user_mailbox") || eventValue(body.event || body, ["message_id", "mail_message_id"])) {
-    processMailboxEvent(body).catch((error) => console.error("Feishu mailbox event failed:", error.message));
+    const messageId = eventValue(body.event || body, ["message_id", "mail_message_id"]);
+    await recordMailboxEvent({
+      status: "webhook_received",
+      eventType,
+      messageIdPresent: Boolean(messageId),
+      error: ""
+    });
+    processMailboxEvent(body)
+      .then(() => recordMailboxEvent({ status: "processed", error: "" }))
+      .catch(async (error) => {
+        await recordMailboxEvent({ status: "failed", error: error.message });
+        console.error("Feishu mailbox event failed:", error.message);
+      });
   }
 }
 
@@ -188,6 +214,24 @@ async function handleMailboxConnectionTest(res, query) {
     connected: true,
     mailboxProbe: "read_only",
     messagesVisible: Array.isArray(items) ? items.length : 0
+  });
+}
+
+async function handleMailboxEventStatus(res, query) {
+  if (!verifyCronToken(query)) {
+    return sendJson(res, 401, { ok: false, error: "invalid_cron_token" });
+  }
+  const stored = await redis.getJson("last-mailbox-event");
+  const event = stored || lastMailboxEvent;
+  return sendJson(res, 200, {
+    ok: true,
+    event: {
+      status: event.status || "not_received",
+      eventType: event.eventType || "",
+      messageIdPresent: Boolean(event.messageIdPresent),
+      updatedAt: event.updatedAt || "",
+      error: event.error || ""
+    }
   });
 }
 
@@ -254,6 +298,10 @@ async function route(req, res) {
 
   if (req.method === "GET" && path === "/debug/mail/connection") {
     return handleMailboxConnectionTest(res, query);
+  }
+
+  if (req.method === "GET" && path === "/debug/mail/event-status") {
+    return handleMailboxEventStatus(res, query);
   }
 
   if ((req.method === "GET" || req.method === "POST") && path === "/jobs/poll-email") {
