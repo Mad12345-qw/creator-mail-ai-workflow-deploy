@@ -207,7 +207,10 @@ export class FeishuClient {
       body: JSON.stringify({
         table: {
           name,
-          default_view_name: defaultViewName
+          default_view_name: defaultViewName,
+          fields: [
+            { field_name: "提交人 / 公司", type: 1 }
+          ]
         }
       })
     });
