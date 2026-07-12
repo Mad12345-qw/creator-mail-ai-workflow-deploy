@@ -19,6 +19,7 @@ let lastOutbound = { status: "not_attempted" };
 let clientIntakeSetup = { status: "not_started" };
 let clientLiveAcceptance = { status: "not_started" };
 let approvalQueueAudit = { status: "not_started" };
+let mailboxInboxAudit = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -454,6 +455,84 @@ async function auditApprovalQueue() {
   return approvalQueueAudit;
 }
 
+function normalizeMailTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^\d+$/.test(raw)) {
+    const numeric = Number(raw);
+    const milliseconds = raw.length <= 10 ? numeric * 1000 : numeric;
+    const date = new Date(milliseconds);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? raw : date.toISOString();
+}
+
+async function auditMailboxInbox() {
+  mailboxInboxAudit = { status: "running", updatedAt: new Date().toISOString() };
+  try {
+    const userToken = await getUserToken();
+    if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
+    const [mailData, logsData] = await Promise.all([
+      feishu.listMailboxMessages({
+        accessToken: userToken.accessToken,
+        folderId: config.feishu.inboxFolderId,
+        pageSize: 20
+      }),
+      feishu.listBitableRecords("emailLog", 100)
+    ]);
+    const messages = mailData.items || mailData.messages || [];
+    const loggedMessageIds = new Set(
+      (logsData.items || []).map((record) => String(record.fields?.["邮件ID"] || "")).filter(Boolean)
+    );
+    const visibleStates = await Promise.all(messages.map(async (item) => {
+      const messageId = getMailboxMessageId(item);
+      return {
+        messageId,
+        receivedAt: item.received_time || item.sent_time || "",
+        deduped: messageId ? Boolean(await redis.exists(`polled-mail:${messageId}`)) : false,
+        logged: messageId ? loggedMessageIds.has(messageId) : false
+      };
+    }));
+    const recent = [];
+    for (const state of visibleStates.slice(0, 5)) {
+      if (!state.messageId) continue;
+      const fullMessage = await feishu.getMailboxMessage({
+        userMailboxId: "me",
+        messageId: state.messageId,
+        accessToken: userToken.accessToken
+      });
+      const source = fullMessage.message || fullMessage;
+      const from = readAddress(source.from || source.sender || source.from_address).trim().toLowerCase();
+      const to = readAddress(source.to || source.recipients || source.to_address).trim().toLowerCase();
+      recent.push({
+        receivedAt: normalizeMailTime(source.received_time || source.sent_time || state.receivedAt),
+        selfSent: Boolean(from && to && from === to),
+        deduped: state.deduped,
+        logged: state.logged
+      });
+    }
+    mailboxInboxAudit = {
+      status: "complete",
+      visibleMessages: messages.length,
+      unprocessedVisible: visibleStates.filter((item) => !item.deduped).length,
+      unloggedVisible: visibleStates.filter((item) => !item.logged).length,
+      recent,
+      readOnly: true,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    mailboxInboxAudit = {
+      status: "failed",
+      readOnly: true,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return mailboxInboxAudit;
+}
+
 async function processApprovedTasks() {
   const tasksData = await feishu.listBitableRecords("approvalTasks", 100);
   const candidates = (tasksData.items || []).filter((task) => {
@@ -547,6 +626,7 @@ async function runMailboxWork(reason) {
   const poll = await pollMailbox();
   const approvals = await processApprovedTasks();
   await auditApprovalQueue();
+  await auditMailboxInbox();
   console.log(`Mailbox work (${reason}):`, poll.status, approvals.sent);
   return { poll, approvals };
 }
@@ -866,6 +946,7 @@ async function route(req, res) {
       clientIntakeSetup,
       clientLiveAcceptance,
       approvalQueueAudit,
+      mailboxInboxAudit,
       missingConfig: getMissingConfig(config)
     });
   }
