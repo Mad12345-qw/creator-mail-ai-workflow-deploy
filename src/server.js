@@ -23,6 +23,7 @@ let mailboxInboxAudit = { status: "not_started" };
 let manualReviewReconciliation = { status: "not_started" };
 let historicalReplayAcceptance = { status: "not_started" };
 let senderAddressReconciliation = { status: "not_started" };
+let missingDraftReconciliation = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -680,6 +681,91 @@ async function reconcileMissingSenderAddresses(limit = 40) {
   return senderAddressReconciliation;
 }
 
+async function reconcileMissingDrafts(limit = 40) {
+  missingDraftReconciliation = { status: "running", scanned: 0, corrected: 0, updatedAt: new Date().toISOString() };
+  try {
+    const userToken = await getUserToken();
+    if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
+    const [logsData, tasksData] = await Promise.all([
+      feishu.listBitableRecords("emailLog", 100),
+      feishu.listBitableRecords("approvalTasks", 100)
+    ]);
+    const blankLogs = (logsData.items || []).filter((record) => {
+      const fields = record.fields || {};
+      return ["draft_reply", "manual_review"].includes(String(fields["处理动作"] || ""))
+        && !String(fields["AI草稿"] || "").trim();
+    });
+    const tasksByMessageId = new Map(
+      (tasksData.items || []).map((task) => [String(task.fields?.["关联邮件ID"] || ""), task])
+    );
+    const messages = [];
+    let pageToken = "";
+    while (messages.length < limit) {
+      const data = await feishu.listMailboxMessages({
+        accessToken: userToken.accessToken,
+        folderId: config.feishu.inboxFolderId,
+        pageSize: Math.min(20, limit - messages.length),
+        pageToken
+      });
+      const pageItems = data.items || data.messages || [];
+      messages.push(...pageItems);
+      const nextPageToken = String(data.page_token || data.pageToken || "");
+      if (!data.has_more || !nextPageToken || !pageItems.length) break;
+      pageToken = nextPageToken;
+    }
+    const messageIds = new Set(messages.map(getMailboxMessageId).filter(Boolean));
+    const dryRunFeishu = dryRunFeishuClient();
+    let corrected = 0;
+    let unresolved = 0;
+    for (const record of blankLogs) {
+      const messageId = String(record.fields?.["邮件ID"] || "");
+      if (!messageId || !messageIds.has(messageId)) {
+        unresolved += 1;
+        continue;
+      }
+      const fullMessage = await feishu.getMailboxMessage({
+        userMailboxId: "me",
+        messageId,
+        accessToken: userToken.accessToken
+      });
+      const email = mapMailboxMessage(fullMessage, messageId);
+      const result = await processCreatorEmail({ email, feishu: dryRunFeishu, openai, ruleStore });
+      const draft = String(result.analysis?.draftReply || "").trim();
+      if (!draft) {
+        unresolved += 1;
+        continue;
+      }
+      await feishu.updateBitableRecord("emailLog", record.record_id, {
+        "AI草稿": draft,
+        "AI摘要": String(result.analysis?.summary || record.fields?.["AI摘要"] || "")
+      });
+      const task = tasksByMessageId.get(messageId);
+      if (task?.record_id) {
+        await feishu.updateBitableRecord("approvalTasks", task.record_id, { "AI草稿": draft });
+      }
+      corrected += 1;
+    }
+    missingDraftReconciliation = {
+      status: "complete",
+      scanned: blankLogs.length,
+      corrected,
+      unresolved,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    missingDraftReconciliation = {
+      status: "failed",
+      scanned: 0,
+      corrected: 0,
+      unresolved: 0,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return missingDraftReconciliation;
+}
+
 async function reconcileManualReviewLogs() {
   manualReviewReconciliation = { status: "running", updatedAt: new Date().toISOString() };
   try {
@@ -986,6 +1072,7 @@ async function processApprovedTasks() {
 async function runMailboxWork(reason) {
   const poll = await pollMailbox();
   await reconcileMissingSenderAddresses(40);
+  await reconcileMissingDrafts(40);
   await reconcileManualReviewLogs();
   const approvals = await processApprovedTasks();
   await auditApprovalQueue();
@@ -1313,6 +1400,7 @@ async function route(req, res) {
       manualReviewReconciliation,
       historicalReplayAcceptance,
       senderAddressReconciliation,
+      missingDraftReconciliation,
       missingConfig: getMissingConfig(config)
     });
   }
