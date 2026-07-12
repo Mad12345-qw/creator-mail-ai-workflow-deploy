@@ -22,6 +22,7 @@ let approvalQueueAudit = { status: "not_started" };
 let mailboxInboxAudit = { status: "not_started" };
 let manualReviewReconciliation = { status: "not_started" };
 let historicalReplayAcceptance = { status: "not_started" };
+let senderAddressReconciliation = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -149,10 +150,64 @@ function eventValue(event, names) {
   return "";
 }
 
-function readAddress(value) {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return readAddress(value[0]);
-  if (value && typeof value === "object") return value.mail_address || value.address || value.email || "";
+function readAddress(value, depth = 0) {
+  if (depth > 6 || value === undefined || value === null) return "";
+  if (typeof value === "string") {
+    const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    return match ? match[0] : "";
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const address = readAddress(item, depth + 1);
+      if (address) return address;
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    const preferredKeys = ["mail_address", "email_address", "address", "email", "mail", "value"];
+    for (const key of preferredKeys) {
+      const address = readAddress(value[key], depth + 1);
+      if (address) return address;
+    }
+    for (const [key, item] of Object.entries(value)) {
+      if (!/(mail|email|address)/i.test(key)) continue;
+      const address = readAddress(item, depth + 1);
+      if (address) return address;
+    }
+    for (const item of Object.values(value)) {
+      const address = readAddress(item, depth + 1);
+      if (address) return address;
+    }
+  }
+  return "";
+}
+
+function readSourceAddress(source, role) {
+  const roleKeys = role === "from"
+    ? ["from", "sender", "from_address", "sender_address", "from_email", "head_from", "envelope_from"]
+    : ["to", "recipients", "to_address", "recipient", "recipient_address", "to_email", "head_to", "envelope_to"];
+  for (const key of roleKeys) {
+    const address = readAddress(source?.[key]);
+    if (address) return address;
+  }
+  const keyPattern = role === "from" ? /(from|sender)/i : /(^to$|recipient)/i;
+  const stack = [{ value: source, depth: 0 }];
+  while (stack.length) {
+    const current = stack.shift();
+    if (!current?.value || typeof current.value !== "object" || current.depth > 5) continue;
+    const headerName = String(current.value.name || current.value.key || current.value.header || "");
+    if (keyPattern.test(headerName)) {
+      const headerAddress = readAddress(current.value.value || current.value.content || current.value.text);
+      if (headerAddress) return headerAddress;
+    }
+    for (const [key, value] of Object.entries(current.value)) {
+      if (keyPattern.test(key)) {
+        const address = readAddress(value);
+        if (address) return address;
+      }
+      if (value && typeof value === "object") stack.push({ value, depth: current.depth + 1 });
+    }
+  }
   return "";
 }
 
@@ -166,7 +221,7 @@ function mapMailboxMessage(message, fallbackMessageId) {
   const body = source.body_plain_text || source.body_text || source.body || source.body_html || "";
   return {
     messageId: source.message_id || source.id || fallbackMessageId,
-    from: readAddress(source.from || source.sender || source.from_address),
+    from: readSourceAddress(source, "from"),
     subject: source.subject || "",
     text: typeof body === "string" ? body : body.plain_text || body.text || body.html || ""
   };
@@ -524,10 +579,12 @@ async function auditMailboxInbox() {
         accessToken: userToken.accessToken
       });
       const source = fullMessage.message || fullMessage;
-      const from = readAddress(source.from || source.sender || source.from_address).trim().toLowerCase();
-      const to = readAddress(source.to || source.recipients || source.to_address).trim().toLowerCase();
+      const from = readSourceAddress(source, "from").trim().toLowerCase();
+      const to = readSourceAddress(source, "to").trim().toLowerCase();
       recent.push({
         receivedAt: normalizeMailTime(source.received_time || source.sent_time || state.receivedAt),
+        fromPresent: Boolean(from),
+        toPresent: Boolean(to),
         selfSent: Boolean(from && to && from === to),
         deduped: state.deduped,
         logged: Boolean(state.logFields),
@@ -556,6 +613,71 @@ async function auditMailboxInbox() {
     };
   }
   return mailboxInboxAudit;
+}
+
+async function reconcileMissingSenderAddresses(limit = 40) {
+  senderAddressReconciliation = { status: "running", scanned: 0, corrected: 0, updatedAt: new Date().toISOString() };
+  try {
+    const userToken = await getUserToken();
+    if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
+    const logsData = await feishu.listBitableRecords("emailLog", 100);
+    const blankLogs = (logsData.items || []).filter((record) => !String(record.fields?.["发件人邮箱"] || "").trim());
+    const messages = [];
+    let pageToken = "";
+    while (messages.length < limit) {
+      const data = await feishu.listMailboxMessages({
+        accessToken: userToken.accessToken,
+        folderId: config.feishu.inboxFolderId,
+        pageSize: Math.min(20, limit - messages.length),
+        pageToken
+      });
+      const pageItems = data.items || data.messages || [];
+      messages.push(...pageItems);
+      const nextPageToken = String(data.page_token || data.pageToken || "");
+      if (!data.has_more || !nextPageToken || !pageItems.length) break;
+      pageToken = nextPageToken;
+    }
+    const messageById = new Map(messages.map((item) => [getMailboxMessageId(item), item]));
+    let corrected = 0;
+    let unresolved = 0;
+    for (const record of blankLogs) {
+      const messageId = String(record.fields?.["邮件ID"] || "");
+      if (!messageId || !messageById.has(messageId)) {
+        unresolved += 1;
+        continue;
+      }
+      const fullMessage = await feishu.getMailboxMessage({
+        userMailboxId: "me",
+        messageId,
+        accessToken: userToken.accessToken
+      });
+      const email = mapMailboxMessage(fullMessage, messageId);
+      if (!email.from) {
+        unresolved += 1;
+        continue;
+      }
+      await feishu.updateBitableRecord("emailLog", record.record_id, { "发件人邮箱": email.from });
+      corrected += 1;
+    }
+    senderAddressReconciliation = {
+      status: "complete",
+      scanned: blankLogs.length,
+      corrected,
+      unresolved,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    senderAddressReconciliation = {
+      status: "failed",
+      scanned: 0,
+      corrected: 0,
+      unresolved: 0,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return senderAddressReconciliation;
 }
 
 async function reconcileManualReviewLogs() {
@@ -863,6 +985,7 @@ async function processApprovedTasks() {
 
 async function runMailboxWork(reason) {
   const poll = await pollMailbox();
+  await reconcileMissingSenderAddresses(40);
   await reconcileManualReviewLogs();
   const approvals = await processApprovedTasks();
   await auditApprovalQueue();
@@ -1189,6 +1312,7 @@ async function route(req, res) {
       mailboxInboxAudit,
       manualReviewReconciliation,
       historicalReplayAcceptance,
+      senderAddressReconciliation,
       missingConfig: getMissingConfig(config)
     });
   }
