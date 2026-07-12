@@ -499,8 +499,10 @@ async function auditMailboxInbox() {
       feishu.listBitableRecords("emailLog", 100)
     ]);
     const messages = mailData.items || mailData.messages || [];
-    const loggedMessageIds = new Set(
-      (logsData.items || []).map((record) => String(record.fields?.["邮件ID"] || "")).filter(Boolean)
+    const logsByMessageId = new Map(
+      (logsData.items || [])
+        .map((record) => [String(record.fields?.["邮件ID"] || ""), record.fields || {}])
+        .filter(([messageId]) => Boolean(messageId))
     );
     const visibleStates = await Promise.all(messages.map(async (item) => {
       const messageId = getMailboxMessageId(item);
@@ -508,7 +510,7 @@ async function auditMailboxInbox() {
         messageId,
         receivedAt: item.received_time || item.sent_time || "",
         deduped: messageId ? Boolean(await redis.exists(`polled-mail:${messageId}`)) : false,
-        logged: messageId ? loggedMessageIds.has(messageId) : false
+        logFields: messageId ? logsByMessageId.get(messageId) || null : null
       };
     }));
     const recent = [];
@@ -526,14 +528,18 @@ async function auditMailboxInbox() {
         receivedAt: normalizeMailTime(source.received_time || source.sent_time || state.receivedAt),
         selfSent: Boolean(from && to && from === to),
         deduped: state.deduped,
-        logged: state.logged
+        logged: Boolean(state.logFields),
+        emailType: String(state.logFields?.["AI识别类型"] || ""),
+        action: String(state.logFields?.["处理动作"] || ""),
+        status: String(state.logFields?.["处理状态"] || ""),
+        hasDraft: Boolean(String(state.logFields?.["AI草稿"] || "").trim())
       });
     }
     mailboxInboxAudit = {
       status: "complete",
       visibleMessages: messages.length,
       unprocessedVisible: visibleStates.filter((item) => !item.deduped).length,
-      unloggedVisible: visibleStates.filter((item) => !item.logged).length,
+      unloggedVisible: visibleStates.filter((item) => !item.logFields).length,
       recent,
       readOnly: true,
       updatedAt: new Date().toISOString(),
