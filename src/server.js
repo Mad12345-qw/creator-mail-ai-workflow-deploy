@@ -1191,12 +1191,14 @@ function historicalPolicyViolation(email, result) {
   return violations;
 }
 
-async function runHistoricalReplayAcceptance(limit = 20) {
-  const cacheKey = "historical-replay-40-20260712-v2";
+async function runHistoricalReplayAcceptance(limit = 40, offset = 0) {
+  const rangeStart = offset + 1;
+  const rangeEnd = offset + limit;
+  const cacheKey = `historical-replay-${rangeStart}-${rangeEnd}-20260712-v3`;
   if (redis.isConfigured()) {
     try {
       const cached = await redis.getJson(cacheKey);
-      if (cached?.status === "passed" && Number(cached.processed || 0) >= limit) {
+      if (cached?.status === "passed" && Number(cached.processed || 0) >= limit && Number(cached.offset || 0) === offset) {
         historicalReplayAcceptance = { ...cached, cached: true };
         return historicalReplayAcceptance;
       }
@@ -1207,6 +1209,8 @@ async function runHistoricalReplayAcceptance(limit = 20) {
   historicalReplayAcceptance = {
     status: "running",
     requested: limit,
+    offset,
+    range: `${rangeStart}-${rangeEnd}`,
     processed: 0,
     updatedAt: new Date().toISOString()
   };
@@ -1215,8 +1219,9 @@ async function runHistoricalReplayAcceptance(limit = 20) {
     if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
     const messages = [];
     let pageToken = "";
-    while (messages.length < limit) {
-      const pageSize = Math.min(20, limit - messages.length);
+    const targetMessageCount = offset + limit;
+    while (messages.length < targetMessageCount) {
+      const pageSize = Math.min(20, targetMessageCount - messages.length);
       const data = await feishu.listMailboxMessages({
         accessToken: userToken.accessToken,
         folderId: config.feishu.inboxFolderId,
@@ -1229,15 +1234,17 @@ async function runHistoricalReplayAcceptance(limit = 20) {
       if (!data.has_more || !nextPageToken || !pageItems.length) break;
       pageToken = nextPageToken;
     }
+    const selectedMessages = messages.slice(offset, offset + limit);
     const dryRunFeishu = dryRunFeishuClient();
     const results = [];
     const errors = [];
     const violations = [];
-    if (messages.length < limit) {
-      errors.push({ sample: 0, error: `Only ${messages.length} mailbox messages were available; ${limit} were requested.` });
+    if (selectedMessages.length < limit) {
+      errors.push({ sample: 0, error: `Only ${selectedMessages.length} messages were available for range ${rangeStart}-${rangeEnd}.` });
     }
-    for (let index = 0; index < messages.length; index += 1) {
-      const messageId = getMailboxMessageId(messages[index]);
+    for (let index = 0; index < selectedMessages.length; index += 1) {
+      const sampleNumber = offset + index + 1;
+      const messageId = getMailboxMessageId(selectedMessages[index]);
       try {
         const fullMessage = await feishu.getMailboxMessage({
           userMailboxId: "me",
@@ -1253,10 +1260,10 @@ async function runHistoricalReplayAcceptance(limit = 20) {
         });
         const itemViolations = historicalPolicyViolation(email, result);
         if (itemViolations.length) {
-          violations.push({ sample: index + 1, reasons: itemViolations });
+          violations.push({ sample: sampleNumber, reasons: itemViolations });
         }
         results.push({
-          sample: index + 1,
+          sample: sampleNumber,
           intent: result.intent,
           action: result.action,
           hasDraft: Boolean(String(result.analysis?.draftReply || "").trim()),
@@ -1264,7 +1271,7 @@ async function runHistoricalReplayAcceptance(limit = 20) {
           passed: itemViolations.length === 0
         });
       } catch (error) {
-        errors.push({ sample: index + 1, error: error.message });
+        errors.push({ sample: sampleNumber, error: error.message });
       }
       historicalReplayAcceptance = {
         ...historicalReplayAcceptance,
@@ -1274,8 +1281,8 @@ async function runHistoricalReplayAcceptance(limit = 20) {
     }
     const passed = errors.length === 0 && violations.length === 0 && results.length === limit;
     const batches = [
-      { from: 1, to: Math.min(20, messages.length) },
-      ...(messages.length > 20 ? [{ from: 21, to: Math.min(40, messages.length) }] : [])
+      { from: rangeStart, to: Math.min(rangeStart + 19, rangeEnd) },
+      ...(limit > 20 ? [{ from: rangeStart + 20, to: rangeEnd }] : [])
     ].map((batch) => {
       const batchResults = results.filter((item) => item.sample >= batch.from && item.sample <= batch.to);
       const batchViolations = violations.filter((item) => item.sample >= batch.from && item.sample <= batch.to);
@@ -1290,7 +1297,9 @@ async function runHistoricalReplayAcceptance(limit = 20) {
     historicalReplayAcceptance = {
       status: passed ? "passed" : "failed",
       requested: limit,
-      processed: messages.length,
+      offset,
+      range: `${rangeStart}-${rangeEnd}`,
+      processed: selectedMessages.length,
       writesSuppressed: true,
       sendsSuppressed: true,
       passedSamples: results.filter((item) => item.passed).length,
@@ -1310,6 +1319,8 @@ async function runHistoricalReplayAcceptance(limit = 20) {
     historicalReplayAcceptance = {
       status: "failed",
       requested: limit,
+      offset,
+      range: `${rangeStart}-${rangeEnd}`,
       processed: 0,
       writesSuppressed: true,
       sendsSuppressed: true,
@@ -1857,7 +1868,7 @@ server.listen(config.port, () => {
       .then(() => reconcileMissingDrafts(40))
       .then(() => reconcileManualReviewLogs())
       .then(() => auditDataIntegrity())
-      .then(() => runHistoricalReplayAcceptance(40))
+      .then(() => runHistoricalReplayAcceptance(40, 40))
       .catch((error) => {
         console.error("Startup validation failed:", error.message);
       });
