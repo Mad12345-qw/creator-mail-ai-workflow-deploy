@@ -21,6 +21,7 @@ let clientLiveAcceptance = { status: "not_started" };
 let approvalQueueAudit = { status: "not_started" };
 let mailboxInboxAudit = { status: "not_started" };
 let manualReviewReconciliation = { status: "not_started" };
+let historicalReplayAcceptance = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -618,6 +619,125 @@ async function reconcileManualReviewLogs() {
   return manualReviewReconciliation;
 }
 
+function historicalPolicyViolation(email, result) {
+  const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
+  const violations = [];
+  const manualSignal = /\brate card\b|\brate\b|quote|pricing|price|\bfee\b|budget|paid collaboration|agreement|contract|payment|invoice|legal/.test(text);
+  const autoReplySignal = /out of office|automatic reply|auto reply/.test(text);
+  const stopContactSignal = /unsubscribe|remove me|stop contacting/.test(text);
+  if (manualSignal && result.action !== "manual_review") {
+    violations.push("manual-review email was not routed to manual_review");
+  }
+  if (autoReplySignal && result.action !== "no_reply") {
+    violations.push("automatic reply was not routed to no_reply");
+  }
+  if (stopContactSignal && result.action !== "record_only") {
+    violations.push("stop-contact email was not routed to record_only");
+  }
+  if (["draft_reply", "manual_review"].includes(result.action) && !String(result.analysis?.draftReply || "").trim()) {
+    violations.push("actionable email did not produce a draft");
+  }
+  if (!["no_reply", "record_only", "draft_reply", "manual_review"].includes(result.action)) {
+    violations.push("workflow returned an unsupported action");
+  }
+  if (!(result.projectMatches || []).length) {
+    violations.push("no live project policy was supplied to the model");
+  }
+  return violations;
+}
+
+async function runHistoricalReplayAcceptance(limit = 20) {
+  historicalReplayAcceptance = {
+    status: "running",
+    requested: limit,
+    processed: 0,
+    updatedAt: new Date().toISOString()
+  };
+  try {
+    const userToken = await getUserToken();
+    if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
+    const data = await feishu.listMailboxMessages({
+      accessToken: userToken.accessToken,
+      folderId: config.feishu.inboxFolderId,
+      pageSize: limit
+    });
+    const messages = (data.items || data.messages || []).slice(0, limit);
+    const dryRunFeishu = dryRunFeishuClient();
+    const results = [];
+    const errors = [];
+    const violations = [];
+    for (let index = 0; index < messages.length; index += 1) {
+      const messageId = getMailboxMessageId(messages[index]);
+      try {
+        const fullMessage = await feishu.getMailboxMessage({
+          userMailboxId: "me",
+          messageId,
+          accessToken: userToken.accessToken
+        });
+        const email = mapMailboxMessage(fullMessage, messageId);
+        const result = await processCreatorEmail({
+          email,
+          feishu: dryRunFeishu,
+          openai,
+          ruleStore
+        });
+        const itemViolations = historicalPolicyViolation(email, result);
+        if (itemViolations.length) {
+          violations.push({ sample: index + 1, reasons: itemViolations });
+        }
+        results.push({
+          sample: index + 1,
+          intent: result.intent,
+          action: result.action,
+          hasDraft: Boolean(String(result.analysis?.draftReply || "").trim()),
+          projectMatched: Boolean((result.projectMatches || []).length),
+          passed: itemViolations.length === 0
+        });
+      } catch (error) {
+        errors.push({ sample: index + 1, error: error.message });
+      }
+      historicalReplayAcceptance = {
+        ...historicalReplayAcceptance,
+        processed: index + 1,
+        updatedAt: new Date().toISOString()
+      };
+    }
+    const passed = errors.length === 0 && violations.length === 0 && results.length === messages.length;
+    historicalReplayAcceptance = {
+      status: passed ? "passed" : "failed",
+      requested: limit,
+      processed: messages.length,
+      writesSuppressed: true,
+      sendsSuppressed: true,
+      passedSamples: results.filter((item) => item.passed).length,
+      failedSamples: messages.length - results.filter((item) => item.passed).length,
+      actionCounts: results.reduce((counts, item) => {
+        counts[item.action] = (counts[item.action] || 0) + 1;
+        return counts;
+      }, {}),
+      results,
+      violations,
+      errors,
+      updatedAt: new Date().toISOString(),
+      error: passed ? "" : "Historical replay acceptance found failures."
+    };
+  } catch (error) {
+    historicalReplayAcceptance = {
+      status: "failed",
+      requested: limit,
+      processed: 0,
+      writesSuppressed: true,
+      sendsSuppressed: true,
+      results: [],
+      violations: [],
+      errors: [],
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return historicalReplayAcceptance;
+}
+
 async function processApprovedTasks() {
   const tasksData = await feishu.listBitableRecords("approvalTasks", 100);
   const candidates = (tasksData.items || []).filter((task) => {
@@ -1034,6 +1154,7 @@ async function route(req, res) {
       approvalQueueAudit,
       mailboxInboxAudit,
       manualReviewReconciliation,
+      historicalReplayAcceptance,
       missingConfig: getMissingConfig(config)
     });
   }
@@ -1115,6 +1236,7 @@ server.listen(config.port, () => {
     ensureClientIntakeTable()
       .then(() => runClientLiveAcceptance())
       .then(() => auditApprovalQueue())
+      .then(() => runHistoricalReplayAcceptance(20))
       .catch(async (error) => {
         await recordClientIntakeSetup({ status: "failed", error: error.message });
         console.error("Client intake setup failed:", error.message);
