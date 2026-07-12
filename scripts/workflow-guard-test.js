@@ -41,8 +41,15 @@ const paidResult = await processCreatorEmail({
 if (paidResult.action !== "manual_review") {
   throw new Error(`Expected manual_review, got ${paidResult.action}`);
 }
-if (!writes.some((write) => write.tableName === "approvalTasks")) {
-  throw new Error("Expected an approval task to be created.");
+const paidLog = writes.find((write) => write.tableName === "emailLog");
+if (!paidLog || paidLog.fields["审批状态"] !== "待处理" || paidLog.fields["是否允许发送"] !== false) {
+  throw new Error("Expected approval controls in the email log.");
+}
+if (!String(paidLog.fields["邮件概览"] || "").includes("creator@example.com")) {
+  throw new Error("Expected a human-readable email overview in the primary field.");
+}
+if (writes.some((write) => write.tableName === "approvalTasks")) {
+  throw new Error("New approvals must not require a separate approval table.");
 }
 if (!String(paidResult.analysis.draftReply || "").trim()) {
   throw new Error("Expected missing manual-review draft to be repaired.");

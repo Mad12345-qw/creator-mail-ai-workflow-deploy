@@ -34,10 +34,16 @@ const CLIENT_WIKI_URL = "https://zcn1ftnw54fl.feishu.cn/wiki/H0tkwIRmYiQ1wnks74N
 const MAILBOX_POLL_SCAN_LIMIT = 500;
 const OPERATIONAL_TABLE_FIELDS = {
   emailLog: [
+    { field_name: "邮件ID", type: 1 },
     { field_name: "邮件正文", type: 1 },
     { field_name: "收件人邮箱", type: 1 },
     { field_name: "接收时间", type: 1 },
     { field_name: "回复发送时间", type: 1 },
+    { field_name: "人工修改稿", type: 1 },
+    { field_name: "是否允许发送", type: 7 },
+    { field_name: "审批状态", type: 1 },
+    { field_name: "负责人", type: 1 },
+    { field_name: "人工备注", type: 1 },
     { field_name: "匹配项目", type: 1 },
     { field_name: "命中规则", type: 1 },
     { field_name: "数据完整性", type: 1 }
@@ -546,13 +552,42 @@ async function ensureOperationalTableFields() {
       const tableId = await feishu.resolveBitableTableId(tableName);
       if (!tableId) throw new Error(`Operational table is not configured: ${tableName}`);
       const fieldsData = await feishu.listBitableFields(tableId, 100);
-      const existingNames = new Set(
-        (fieldsData.items || []).map((item) => String(item.field_name || item.name || ""))
-      );
+      const existingFields = fieldsData.items || [];
+      const existingNames = new Set(existingFields.map((item) => String(item.field_name || item.name || "")));
+      if (tableName === "emailLog" && !existingNames.has("邮件概览")) {
+        const technicalPrimaryField = existingFields.find((item) => String(item.field_name || item.name || "") === "邮件ID");
+        const fieldId = bitableItemId(technicalPrimaryField, "field");
+        if (fieldId) {
+          await feishu.updateBitableField(tableId, fieldId, {
+            field_name: "邮件概览",
+            type: Number(technicalPrimaryField.type || 1)
+          });
+          existingNames.delete("邮件ID");
+          existingNames.add("邮件概览");
+          createdFields.push("emailLog.邮件概览(主列重命名)");
+        }
+      }
       for (const field of fields) {
         if (existingNames.has(field.field_name)) continue;
         await feishu.createBitableField(tableId, field);
         createdFields.push(`${tableName}.${field.field_name}`);
+      }
+      if (tableName === "emailLog") {
+        const recordsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
+        for (const record of recordsData.items || []) {
+          const recordFields = record.fields || {};
+          const messageId = String(recordFields["邮件ID"] || recordFields["邮件概览"] || "").trim();
+          const overview = formatEmailOverview({
+            receivedAt: recordFields["接收时间"],
+            from: recordFields["发件人邮箱"],
+            subject: recordFields["邮件主题"]
+          });
+          if (!messageId && !overview) continue;
+          await feishu.updateBitableRecord("emailLog", record.record_id, {
+            ...(messageId ? { "邮件ID": messageId } : {}),
+            "邮件概览": overview || messageId
+          });
+        }
       }
     }
     operationalSchemaAudit = {
@@ -570,6 +605,13 @@ async function ensureOperationalTableFields() {
     };
   }
   return operationalSchemaAudit;
+}
+
+function formatEmailOverview(email) {
+  const receivedAt = String(email?.receivedAt || "").trim() || "时间待补充";
+  const from = String(email?.from || "").trim() || "未知发件人";
+  const subject = String(email?.subject || "").trim() || "无主题";
+  return `${receivedAt} | ${from} | ${subject}`.slice(0, 500);
 }
 
 function hasProjectIdentity(record) {
@@ -683,9 +725,6 @@ async function auditApprovalQueue() {
       feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 }),
       feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 })
     ]);
-    const logsByMessageId = new Map(
-      (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record.fields || {}])
-    );
     const latestEmailLogs = (logsData.items || [])
       .slice()
       .sort((left, right) => Number(right.created_time || 0) - Number(left.created_time || 0))
@@ -702,19 +741,17 @@ async function auditApprovalQueue() {
         };
       });
     const tasks = tasksData.items || [];
+    const mergedApprovals = (logsData.items || []).filter(
+      (record) => String(record.fields?.["处理动作"] || "") === "manual_review"
+    );
     let testRecords = 0;
     let realRecords = 0;
-    let unknownRecords = 0;
     const statusCounts = {};
-    for (const task of tasks) {
-      const fields = task.fields || {};
-      const taskStatus = String(fields["任务状态"] || "未设置");
-      statusCounts[taskStatus] = (statusCounts[taskStatus] || 0) + 1;
-      const messageId = String(fields["关联邮件ID"] || "");
-      const logFields = logsByMessageId.get(messageId);
-      if (!logFields) {
-        unknownRecords += 1;
-      } else if (isKnownTestEmail(logFields)) {
+    for (const record of mergedApprovals) {
+      const fields = record.fields || {};
+      const approvalStatus = String(fields["审批状态"] || "未设置");
+      statusCounts[approvalStatus] = (statusCounts[approvalStatus] || 0) + 1;
+      if (isKnownTestEmail(fields)) {
         testRecords += 1;
       } else {
         realRecords += 1;
@@ -722,11 +759,13 @@ async function auditApprovalQueue() {
     }
     approvalQueueAudit = {
       status: "complete",
-      totalRecords: tasks.length,
+      mode: "merged_email_log",
+      totalRecords: mergedApprovals.length,
       totalEmailLogs: (logsData.items || []).length,
+      legacyArchivedRecords: tasks.length,
       testRecords,
       realRecords,
-      unknownRecords,
+      unknownRecords: 0,
       statusCounts,
       latestEmailLogs,
       readOnly: true,
@@ -1045,6 +1084,7 @@ async function reconcileHistoricalContext(limit = 40) {
         .filter(Boolean)
         .join("; ");
       const updateFields = {
+        "邮件概览": formatEmailOverview(email),
         "发件人邮箱": email.from || "",
         "收件人邮箱": email.to || "",
         "邮件主题": email.subject || "",
@@ -1098,45 +1138,37 @@ async function reconcileManualReviewLogs() {
       feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 }),
       feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 })
     ]);
-    const taskMessageIds = new Set(
-      (tasksData.items || []).map((task) => String(task.fields?.["关联邮件ID"] || "")).filter(Boolean)
+    const tasksByMessageId = new Map(
+      (tasksData.items || []).map((task) => [String(task.fields?.["关联邮件ID"] || ""), task.fields || {}])
     );
     let correctedLogs = 0;
-    let createdTasks = 0;
+    let migratedApprovals = 0;
     for (const record of logsData.items || []) {
       const fields = record.fields || {};
       const intent = String(fields["AI识别类型"] || "");
       const action = String(fields["处理动作"] || "");
       const messageId = String(fields["邮件ID"] || "");
-      if (!messageId || action === "manual_review" || !requiresManualReviewIntent(intent)) continue;
-
-      await feishu.updateBitableRecord("emailLog", record.record_id, {
+      if (!messageId || (action !== "manual_review" && !requiresManualReviewIntent(intent))) continue;
+      const task = tasksByMessageId.get(messageId) || {};
+      const updateFields = {
         "处理动作": "manual_review",
         "风险等级": "High",
-        "处理状态": "待人工确认"
-      });
-      correctedLogs += 1;
-      if (taskMessageIds.has(messageId)) continue;
-      await feishu.createBitableRecord("approvalTasks", {
-        "任务标题": `Review creator email: ${String(fields["邮件主题"] || "(no subject)")}`,
-        "任务类型": "邮件人工确认",
-        "风险等级": "High",
-        "AI建议": String(fields["AI摘要"] || "Manual review required."),
-        "AI草稿": String(fields["AI草稿"] || ""),
-        "人工修改稿": "",
-        "是否允许发送": false,
-        "任务状态": "待处理",
-        "负责人": "",
-        "人工备注": "",
-        "关联邮件ID": messageId
-      });
-      taskMessageIds.add(messageId);
-      createdTasks += 1;
+        "处理状态": String(fields["处理状态"] || "") === "已发送" ? "已发送" : "待人工确认",
+        "人工修改稿": String(fields["人工修改稿"] || task["人工修改稿"] || ""),
+        "是否允许发送": isChecked(fields["是否允许发送"]) || isChecked(task["是否允许发送"]),
+        "审批状态": String(fields["审批状态"] || task["任务状态"] || "待处理"),
+        "负责人": String(fields["负责人"] || task["负责人"] || ""),
+        "人工备注": String(fields["人工备注"] || task["人工备注"] || "")
+      };
+      await feishu.updateBitableRecord("emailLog", record.record_id, updateFields);
+      if (action !== "manual_review") correctedLogs += 1;
+      if (Object.keys(task).length) migratedApprovals += 1;
     }
     manualReviewReconciliation = {
       status: "complete",
       correctedLogs,
-      createdTasks,
+      createdTasks: 0,
+      migratedApprovals,
       updatedAt: new Date().toISOString(),
       error: ""
     };
@@ -1191,18 +1223,16 @@ async function auditDataIntegrity() {
     }).length;
     const manualLogsMissingApproval = productionLogs.filter((record) => {
       const fields = record.fields || {};
-      const messageId = String(fields["邮件ID"] || "");
-      return String(fields["处理动作"] || "") === "manual_review" && messageId && !taskCounts.has(messageId);
+      return String(fields["处理动作"] || "") === "manual_review"
+        && !String(fields["审批状态"] || "").trim();
     }).length;
-    const orphanApprovalTasks = tasks.filter((task) => {
-      const messageId = String(task.fields?.["关联邮件ID"] || "");
-      return !messageId || !allMessageIds.has(messageId);
-    }).length;
-    const missingApprovalContext = productionTasks.filter((task) => {
-      const fields = task.fields || {};
+    const orphanApprovalTasks = 0;
+    const missingApprovalContext = productionLogs.filter((record) => {
+      const fields = record.fields || {};
+      if (String(fields["处理动作"] || "") !== "manual_review") return false;
       return !String(fields["发件人邮箱"] || "")
-        || !String(fields["原邮件正文"] || "").trim()
-        || !String(fields["原邮件主题"] || "");
+        || !String(fields["邮件正文"] || "").trim()
+        || !String(fields["AI草稿"] || "").trim();
     }).length;
     const receivedTimeCount = productionLogs.filter((record) => String(record.fields?.["接收时间"] || "").trim()).length;
     const sentProductionLogs = productionLogs.filter((record) => String(record.fields?.["处理状态"] || "") === "已发送");
@@ -1225,6 +1255,8 @@ async function auditDataIntegrity() {
       productionEmailLogs: productionLogs.length,
       testEmailLogs: logs.length - productionLogs.length,
       approvalTasks: tasks.length,
+      approvalMode: "merged_email_log",
+      legacyApprovalTasks: tasks.length,
       timeCoverage: {
         received: receivedTimeCount,
         receivedExpected: productionLogs.length,
@@ -1432,40 +1464,34 @@ async function runHistoricalReplayAcceptance(limit = 40, offset = 0) {
 }
 
 async function processApprovedTasks() {
-  const tasksData = await feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 });
-  const candidates = (tasksData.items || []).filter((task) => {
-    const fields = task.fields || {};
-    const status = String(fields["任务状态"] || "");
+  const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
+  const candidates = (logsData.items || []).filter((record) => {
+    const fields = record.fields || {};
+    const status = String(fields["审批状态"] || "");
     const eligibleStatus = ["待处理", "待人工确认", "已批准", "待发送"].includes(status)
       || (!config.safeTestMode && status === "安全模式拦截");
     return isChecked(fields["是否允许发送"]) && eligibleStatus;
   });
   if (!candidates.length) return { checked: 0, sent: 0, failed: 0, safeModeSkipped: 0 };
-
-  const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
-  const logsByMessageId = new Map(
-    (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record])
-  );
   const userToken = await getUserToken();
   if (!userToken) throw new Error("Mailbox owner authorization is required before sending approved mail.");
 
   let sent = 0;
   let failed = 0;
   let safeModeSkipped = 0;
-  for (const task of candidates) {
-    const fields = task.fields || {};
-    const messageId = String(fields["关联邮件ID"] || "");
-    const emailLog = logsByMessageId.get(messageId);
-    const recipient = String(emailLog?.fields?.["发件人邮箱"] || "").trim();
-    const draft = String(fields["人工修改稿"] || fields["AI草稿"] || emailLog?.fields?.["AI草稿"] || "").trim();
+  for (const emailLog of candidates) {
+    const fields = emailLog.fields || {};
+    const messageId = String(fields["邮件ID"] || "");
+    const recipient = String(fields["发件人邮箱"] || "").trim();
+    const draft = String(fields["人工修改稿"] || fields["AI草稿"] || "").trim();
     if (!recipient || !draft) {
-      await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "发送资料不完整" });
+      await feishu.updateBitableRecord("emailLog", emailLog.record_id, { "审批状态": "发送资料不完整" });
       continue;
     }
     const recipientAllowed = config.testRecipients.includes(recipient.toLowerCase());
     if (config.safeTestMode && !recipientAllowed) {
       safeModeSkipped += 1;
-      await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "安全模式拦截" });
+      await feishu.updateBitableRecord("emailLog", emailLog.record_id, { "审批状态": "安全模式拦截" });
       await recordOutbound({
         status: "blocked_by_safe_test_mode",
         recipient,
@@ -1475,7 +1501,7 @@ async function processApprovedTasks() {
       });
       continue;
     }
-    const originalSubject = String(emailLog?.fields?.["邮件主题"] || "");
+    const originalSubject = String(fields["邮件主题"] || "");
     const subject = /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`;
     await recordOutbound({ status: "sending", recipient, subject, messageId, apiAccepted: false, error: "" });
     let result;
@@ -1485,7 +1511,7 @@ async function processApprovedTasks() {
         to: recipient,
         subject,
         bodyPlainText: draft,
-        dedupeKey: `approval-${task.record_id}-${messageId}`
+        dedupeKey: `approval-email-log-${emailLog.record_id}-${messageId}`
       });
     } catch (error) {
       failed += 1;
@@ -1497,10 +1523,10 @@ async function processApprovedTasks() {
         apiAccepted: false,
         error: error.message
       });
-      await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "发送失败" });
+      await feishu.updateBitableRecord("emailLog", emailLog.record_id, { "审批状态": "发送失败" });
       await feishu.createBitableRecord("actionLogs", {
         "事件类型": "approved_mail_send_failed",
-        "事件来源": "approval_task",
+        "事件来源": "email_log_approval",
         "操作内容": subject,
         "操作结果": "failed",
         "错误信息": error.message,
@@ -1518,19 +1544,14 @@ async function processApprovedTasks() {
       error: ""
     });
     const replySentAt = formatMailTime(Date.now());
-    await feishu.updateBitableRecord("approvalTasks", task.record_id, {
-      "任务状态": "已发送",
+    await feishu.updateBitableRecord("emailLog", emailLog.record_id, {
+      "处理状态": "已发送",
+      "审批状态": "已发送",
       "回复发送时间": replySentAt
     });
-    if (emailLog?.record_id) {
-      await feishu.updateBitableRecord("emailLog", emailLog.record_id, {
-        "处理状态": "已发送",
-        "回复发送时间": replySentAt
-      });
-    }
     await feishu.createBitableRecord("actionLogs", {
       "事件类型": "approved_mail_sent",
-      "事件来源": "approval_task",
+      "事件来源": "email_log_approval",
       "操作内容": subject,
       "操作结果": result.message_id || "sent",
       "错误信息": "",

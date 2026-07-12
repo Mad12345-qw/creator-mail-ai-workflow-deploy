@@ -178,6 +178,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
   ].filter(Boolean);
 
   const logFields = {
+    "邮件概览": `${email.receivedAt || "时间待补充"} | ${email.from || "未知发件人"} | ${email.subject || "无主题"}`.slice(0, 500),
     "邮件ID": email.messageId || "",
     "发件人邮箱": email.from || "",
     "收件人邮箱": email.to || "",
@@ -189,6 +190,11 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     "处理动作": action,
     "AI摘要": analysis.summary || "",
     "AI草稿": analysis.draftReply || "",
+    "人工修改稿": "",
+    "是否允许发送": false,
+    "审批状态": action === "manual_review" ? "待处理" : "无需审批",
+    "负责人": "",
+    "人工备注": "",
     "关联达人": creator?.name || "",
     "匹配项目": matchedProjectText,
     "命中规则": matchedRule?.id || "",
@@ -197,27 +203,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
   };
 
   const writeResult = await feishu.createBitableRecord("emailLog", logFields);
-  let approvalResult = null;
-  if (action === "manual_review") {
-    approvalResult = await feishu.createBitableRecord("approvalTasks", {
-      "任务标题": `Review creator email: ${email.subject || "(no subject)"}`,
-      "任务类型": "邮件人工确认",
-      "风险等级": logFields["风险等级"],
-      "AI建议": analysis.summary || "Manual review required.",
-      "AI草稿": analysis.draftReply || "",
-      "人工修改稿": "",
-      "是否允许发送": false,
-      "任务状态": "待处理",
-      "负责人": "",
-      "人工备注": "",
-      "关联邮件ID": email.messageId || "",
-      "发件人邮箱": email.from || "",
-      "原邮件主题": email.subject || "",
-      "原邮件正文": String(email.text || "").slice(0, 20000),
-      "接收时间": email.receivedAt || "",
-      "匹配项目": matchedProjectText
-    });
-  }
+  const approvalResult = null;
 
   return {
     intent,

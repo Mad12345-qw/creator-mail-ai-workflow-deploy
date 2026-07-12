@@ -274,6 +274,19 @@ export class FeishuClient {
     return data.data || data;
   }
 
+  async updateBitableField(tableId, fieldId, field) {
+    const appToken = this.config.bitable.appToken;
+    if (!appToken || !tableId || !fieldId) throw new Error("Bitable app token, table id and field id are required.");
+    const data = await this.request(
+      `/bitable/v1/apps/${appToken}/tables/${tableId}/fields/${fieldId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(field)
+      }
+    );
+    return data.data || data;
+  }
+
   async listBitableViews(tableId, pageSize = 100) {
     const appToken = this.config.bitable.appToken;
     if (!appToken || !tableId) return { skipped: true, items: [] };
