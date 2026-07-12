@@ -18,6 +18,7 @@ let lastMailboxPoll = { status: "not_started" };
 let lastOutbound = { status: "not_attempted" };
 let clientIntakeSetup = { status: "not_started" };
 let clientLiveAcceptance = { status: "not_started" };
+let approvalQueueAudit = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -391,6 +392,66 @@ async function runClientLiveAcceptance() {
     };
   }
   return clientLiveAcceptance;
+}
+
+function isKnownTestEmail(fields) {
+  const messageId = String(fields["邮件ID"] || "").toLowerCase();
+  const subject = String(fields["邮件主题"] || "").toLowerCase();
+  const sender = String(fields["发件人邮箱"] || "").trim().toLowerCase();
+  return messageId.includes("acceptance")
+    || /\btest\b|测试|polling final check|polling test ready|mail event test/.test(subject)
+    || config.testRecipients.includes(sender);
+}
+
+async function auditApprovalQueue() {
+  approvalQueueAudit = { status: "running", updatedAt: new Date().toISOString() };
+  try {
+    const [tasksData, logsData] = await Promise.all([
+      feishu.listBitableRecords("approvalTasks", 100),
+      feishu.listBitableRecords("emailLog", 100)
+    ]);
+    const logsByMessageId = new Map(
+      (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record.fields || {}])
+    );
+    const tasks = tasksData.items || [];
+    let testRecords = 0;
+    let realRecords = 0;
+    let unknownRecords = 0;
+    const statusCounts = {};
+    for (const task of tasks) {
+      const fields = task.fields || {};
+      const taskStatus = String(fields["任务状态"] || "未设置");
+      statusCounts[taskStatus] = (statusCounts[taskStatus] || 0) + 1;
+      const messageId = String(fields["关联邮件ID"] || "");
+      const logFields = logsByMessageId.get(messageId);
+      if (!logFields) {
+        unknownRecords += 1;
+      } else if (isKnownTestEmail(logFields)) {
+        testRecords += 1;
+      } else {
+        realRecords += 1;
+      }
+    }
+    approvalQueueAudit = {
+      status: "complete",
+      totalRecords: tasks.length,
+      testRecords,
+      realRecords,
+      unknownRecords,
+      statusCounts,
+      readOnly: true,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    approvalQueueAudit = {
+      status: "failed",
+      readOnly: true,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return approvalQueueAudit;
 }
 
 async function processApprovedTasks() {
@@ -796,6 +857,7 @@ async function route(req, res) {
       publicSampleProcessing: false,
       clientIntakeSetup,
       clientLiveAcceptance,
+      approvalQueueAudit,
       missingConfig: getMissingConfig(config)
     });
   }
@@ -876,6 +938,7 @@ server.listen(config.port, () => {
   setTimeout(() => {
     ensureClientIntakeTable()
       .then(() => runClientLiveAcceptance())
+      .then(() => auditApprovalQueue())
       .catch(async (error) => {
         await recordClientIntakeSetup({ status: "failed", error: error.message });
         console.error("Client intake setup failed:", error.message);
