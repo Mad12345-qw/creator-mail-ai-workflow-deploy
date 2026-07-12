@@ -17,6 +17,7 @@ let lastMailboxEvent = { status: "not_received" };
 let lastMailboxPoll = { status: "not_started" };
 let lastOutbound = { status: "not_attempted" };
 let clientIntakeSetup = { status: "not_started" };
+let clientLiveAcceptance = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -297,6 +298,99 @@ async function ensureClientIntakeTable() {
     error: ""
   });
   return clientIntakeSetup;
+}
+
+function hasProjectIdentity(record) {
+  const fields = record?.fields || {};
+  return [fields["品牌名称"], fields["产品名称"], fields["项目名称"]]
+    .some((value) => String(value || "").trim());
+}
+
+function dryRunFeishuClient() {
+  return new Proxy(feishu, {
+    get(target, property) {
+      if (property === "createBitableRecord" || property === "updateBitableRecord" || property === "deleteBitableRecord") {
+        return async () => ({ skipped: true, dryRun: true });
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
+async function runClientLiveAcceptance() {
+  clientLiveAcceptance = { status: "running", updatedAt: new Date().toISOString() };
+  try {
+    const data = await feishu.listBitableRecords("projectProducts", 100);
+    const records = (data.items || []).filter(hasProjectIdentity);
+    if (!records.length) throw new Error("No completed client project record was found.");
+
+    const record = records[0];
+    const fields = record.fields || {};
+    const brand = String(fields["品牌名称"] || "").trim();
+    const product = String(fields["产品名称"] || "").trim();
+    const campaign = String(fields["项目名称"] || "").trim();
+    const identity = brand || product || campaign;
+    const dryRunFeishu = dryRunFeishuClient();
+    const scenarios = [
+      {
+        name: "quote_requires_review",
+        email: {
+          messageId: `client-live-acceptance-quote-${Date.now()}`,
+          from: "delivery-acceptance@example.com",
+          subject: `${identity} collaboration rate`,
+          text: `My rate is USD 150 for one video featuring ${product || identity}.`
+        },
+        allowedActions: ["manual_review"]
+      },
+      {
+        name: "sample_draft",
+        email: {
+          messageId: `client-live-acceptance-sample-${Date.now()}`,
+          from: "delivery-acceptance@example.com",
+          subject: `${identity} sample request`,
+          text: `Could you share the sample application details for ${product || identity}?`
+        },
+        allowedActions: ["draft_reply", "manual_review"]
+      }
+    ];
+
+    const results = [];
+    for (const scenario of scenarios) {
+      const result = await processCreatorEmail({
+        email: scenario.email,
+        feishu: dryRunFeishu,
+        openai,
+        ruleStore
+      });
+      const projectMatched = result.projectMatches.some((project) => project.recordId === record.record_id);
+      if (!projectMatched) throw new Error(`${scenario.name}: client project policy was not matched.`);
+      if (!scenario.allowedActions.includes(result.action)) {
+        throw new Error(`${scenario.name}: unexpected action ${result.action}.`);
+      }
+      results.push({ name: scenario.name, action: result.action, projectMatched });
+    }
+
+    clientLiveAcceptance = {
+      status: "passed",
+      projectRecordsFound: records.length,
+      projectPolicyRead: true,
+      writesSuppressed: true,
+      scenarios: results,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    clientLiveAcceptance = {
+      status: "failed",
+      projectPolicyRead: false,
+      writesSuppressed: true,
+      scenarios: [],
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return clientLiveAcceptance;
 }
 
 async function processApprovedTasks() {
@@ -701,6 +795,7 @@ async function route(req, res) {
       outboundTracking: "enabled",
       publicSampleProcessing: false,
       clientIntakeSetup,
+      clientLiveAcceptance,
       missingConfig: getMissingConfig(config)
     });
   }
@@ -779,10 +874,12 @@ server.listen(config.port, () => {
   console.log(`creator-mail-ai-workflow listening on ${config.port}`);
   setTimeout(() => scheduleMailboxPoll("startup"), 3_000);
   setTimeout(() => {
-    ensureClientIntakeTable().catch(async (error) => {
-      await recordClientIntakeSetup({ status: "failed", error: error.message });
-      console.error("Client intake setup failed:", error.message);
-    });
+    ensureClientIntakeTable()
+      .then(() => runClientLiveAcceptance())
+      .catch(async (error) => {
+        await recordClientIntakeSetup({ status: "failed", error: error.message });
+        console.error("Client intake setup failed:", error.message);
+      });
   }, 5_000);
   setInterval(() => scheduleMailboxPoll("interval"), 60_000).unref();
 });
