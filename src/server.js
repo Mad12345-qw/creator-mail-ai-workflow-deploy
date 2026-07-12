@@ -813,11 +813,11 @@ async function auditMailboxInbox() {
         messageId: state.messageId,
         accessToken: userToken.accessToken
       });
-      const source = fullMessage.message || fullMessage;
-      const from = readSourceAddress(source, "from").trim().toLowerCase();
-      const to = readSourceAddress(source, "to").trim().toLowerCase();
+      const email = mapMailboxMessage(fullMessage, state.messageId);
+      const from = email.from.trim().toLowerCase();
+      const to = email.to.trim().toLowerCase();
       recent.push({
-        receivedAt: normalizeMailTime(source.received_time || source.sent_time || state.receivedAt),
+        receivedAt: email.receivedAt,
         fromPresent: Boolean(from),
         toPresent: Boolean(to),
         selfSent: Boolean(from && to && from === to),
@@ -1204,6 +1204,9 @@ async function auditDataIntegrity() {
         || !String(fields["原邮件正文"] || "").trim()
         || !String(fields["原邮件主题"] || "");
     }).length;
+    const receivedTimeCount = productionLogs.filter((record) => String(record.fields?.["接收时间"] || "").trim()).length;
+    const sentProductionLogs = productionLogs.filter((record) => String(record.fields?.["处理状态"] || "") === "已发送");
+    const replySentTimeCount = sentProductionLogs.filter((record) => String(record.fields?.["回复发送时间"] || "").trim()).length;
     const issues = {
       duplicateEmailLogs,
       duplicateApprovalTasks,
@@ -1222,6 +1225,12 @@ async function auditDataIntegrity() {
       productionEmailLogs: productionLogs.length,
       testEmailLogs: logs.length - productionLogs.length,
       approvalTasks: tasks.length,
+      timeCoverage: {
+        received: receivedTimeCount,
+        receivedExpected: productionLogs.length,
+        replySent: replySentTimeCount,
+        replySentExpected: sentProductionLogs.length
+      },
       issues,
       issueCount,
       updatedAt: new Date().toISOString(),
