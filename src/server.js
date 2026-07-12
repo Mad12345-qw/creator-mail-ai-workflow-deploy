@@ -37,6 +37,7 @@ const OPERATIONAL_TABLE_FIELDS = {
     { field_name: "邮件正文", type: 1 },
     { field_name: "收件人邮箱", type: 1 },
     { field_name: "接收时间", type: 1 },
+    { field_name: "回复发送时间", type: 1 },
     { field_name: "匹配项目", type: 1 },
     { field_name: "命中规则", type: 1 },
     { field_name: "数据完整性", type: 1 }
@@ -45,6 +46,8 @@ const OPERATIONAL_TABLE_FIELDS = {
     { field_name: "发件人邮箱", type: 1 },
     { field_name: "原邮件主题", type: 1 },
     { field_name: "原邮件正文", type: 1 },
+    { field_name: "接收时间", type: 1 },
+    { field_name: "回复发送时间", type: 1 },
     { field_name: "匹配项目", type: 1 }
   ]
 };
@@ -232,6 +235,47 @@ function readSourceAddress(source, role) {
   return "";
 }
 
+function readTimePrimitive(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value !== "string") return "";
+  const raw = value.trim();
+  if (!raw || !normalizeMailTime(raw)) return "";
+  return raw;
+}
+
+function readSourceTime(source, role) {
+  const preferredKeys = role === "received"
+    ? ["received_time", "receive_time", "received_at", "receive_at", "delivered_time", "delivery_time", "internal_date", "internal_time", "created_time", "create_time"]
+    : ["sent_time", "send_time", "sent_at", "send_at", "date"];
+  for (const key of preferredKeys) {
+    const value = readTimePrimitive(source?.[key]);
+    if (value) return value;
+  }
+
+  const keySet = new Set(preferredKeys);
+  const headerPattern = role === "sent" ? /^(date|sent|send)$/i : /^(received|delivery|delivered)$/i;
+  const stack = [{ value: source, depth: 0 }];
+  while (stack.length) {
+    const current = stack.shift();
+    if (!current?.value || typeof current.value !== "object" || current.depth > 5) continue;
+    const headerName = String(current.value.name || current.value.key || current.value.header || "").trim();
+    if (headerPattern.test(headerName)) {
+      const headerTime = readTimePrimitive(current.value.value || current.value.content || current.value.text);
+      if (headerTime) return headerTime;
+    }
+    for (const [key, value] of Object.entries(current.value)) {
+      if (keySet.has(String(key).toLowerCase())) {
+        const nestedTime = readTimePrimitive(value);
+        if (nestedTime) return nestedTime;
+      }
+      if (value && typeof value === "object" && !/(body|content|attachment)/i.test(key)) {
+        stack.push({ value, depth: current.depth + 1 });
+      }
+    }
+  }
+  return "";
+}
+
 function getMailboxMessageId(message) {
   if (typeof message === "string") return message;
   return message?.message_id || message?.id || "";
@@ -244,13 +288,16 @@ function getBitableRecordId(result) {
 function mapMailboxMessage(message, fallbackMessageId) {
   const source = message.message || message;
   const body = source.body_plain_text || source.body_text || source.body || source.body_html || "";
+  const sentTime = readSourceTime(source, "sent");
+  const receivedTime = readSourceTime(source, "received");
   return {
     messageId: source.message_id || source.id || fallbackMessageId,
     from: readSourceAddress(source, "from"),
     to: readSourceAddress(source, "to"),
     subject: source.subject || "",
     text: typeof body === "string" ? body : body.plain_text || body.text || body.html || "",
-    receivedAt: normalizeMailTime(source.received_time || source.sent_time || source.created_time)
+    receivedAt: formatMailTime(receivedTime || sentTime),
+    sentAt: formatMailTime(sentTime)
   };
 }
 
@@ -710,6 +757,26 @@ function normalizeMailTime(value) {
   return Number.isNaN(date.getTime()) ? raw : date.toISOString();
 }
 
+function formatMailTime(value) {
+  const normalized = normalizeMailTime(value);
+  if (!normalized) return "";
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return normalized;
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).formatToParts(date).map((part) => [part.type, part.value])
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
 async function auditMailboxInbox() {
   mailboxInboxAudit = { status: "running", updatedAt: new Date().toISOString() };
   try {
@@ -938,14 +1005,24 @@ async function reconcileHistoricalContext(limit = 40) {
   try {
     const userToken = await getUserToken();
     if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
-    const [logsData, tasksData] = await Promise.all([
+    const [logsData, tasksData, actionLogsData] = await Promise.all([
       feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 }),
-      feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 })
+      feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 }),
+      feishu.listAllBitableRecords("actionLogs", { maxRecords: 1000 })
     ]);
     const messages = await listMailboxHistory(userToken, limit);
     const messageIds = new Set(messages.map(getMailboxMessageId).filter(Boolean));
     const tasksByMessageId = new Map(
       (tasksData.items || []).map((task) => [String(task.fields?.["关联邮件ID"] || ""), task])
+    );
+    const sentTimesByMessageId = new Map(
+      (actionLogsData.items || [])
+        .filter((record) => String(record.fields?.["事件类型"] || "") === "approved_mail_sent")
+        .map((record) => [
+          String(record.fields?.["关联邮件ID"] || ""),
+          formatMailTime(record.created_time || record.createdTime || record.last_modified_time || record.lastModifiedTime)
+        ])
+        .filter(([messageId, sentAt]) => Boolean(messageId && sentAt))
     );
     const dryRunFeishu = dryRunFeishuClient();
     let corrected = 0;
@@ -977,6 +1054,8 @@ async function reconcileHistoricalContext(limit = 40) {
         "命中规则": result.matchedRule || "",
         "数据完整性": email.from && (email.subject || email.text) ? "complete" : "incomplete_source"
       };
+      const replySentAt = sentTimesByMessageId.get(messageId) || "";
+      if (replySentAt) updateFields["回复发送时间"] = replySentAt;
       await feishu.updateBitableRecord("emailLog", record.record_id, updateFields);
       const task = tasksByMessageId.get(messageId);
       if (task?.record_id) {
@@ -984,6 +1063,8 @@ async function reconcileHistoricalContext(limit = 40) {
           "发件人邮箱": email.from || "",
           "原邮件主题": email.subject || "",
           "原邮件正文": String(email.text || "").slice(0, 20000),
+          "接收时间": email.receivedAt || "",
+          ...(replySentAt ? { "回复发送时间": replySentAt } : {}),
           "匹配项目": matchedProjectText
         });
       }
@@ -1427,9 +1508,16 @@ async function processApprovedTasks() {
       providerMessageId: result.message_id || "",
       error: ""
     });
-    await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "已发送" });
+    const replySentAt = formatMailTime(Date.now());
+    await feishu.updateBitableRecord("approvalTasks", task.record_id, {
+      "任务状态": "已发送",
+      "回复发送时间": replySentAt
+    });
     if (emailLog?.record_id) {
-      await feishu.updateBitableRecord("emailLog", emailLog.record_id, { "处理状态": "已发送" });
+      await feishu.updateBitableRecord("emailLog", emailLog.record_id, {
+        "处理状态": "已发送",
+        "回复发送时间": replySentAt
+      });
     }
     await feishu.createBitableRecord("actionLogs", {
       "事件类型": "approved_mail_sent",

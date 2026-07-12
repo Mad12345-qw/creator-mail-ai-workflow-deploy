@@ -214,6 +214,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
       "发件人邮箱": email.from || "",
       "原邮件主题": email.subject || "",
       "原邮件正文": String(email.text || "").slice(0, 20000),
+      "接收时间": email.receivedAt || "",
       "匹配项目": matchedProjectText
     });
   }
