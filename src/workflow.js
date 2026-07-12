@@ -13,7 +13,7 @@ const MANUAL_INTENTS = new Set([
 export function requiresManualReviewIntent(intent) {
   const normalized = String(intent || "").trim().toLowerCase();
   return MANUAL_INTENTS.has(normalized)
-    || /(quote|rate|pricing|price|fee|budget|negotiat|paid[_ -]?collaboration|agreement|contract|payment|complaint|legal|safety)/.test(normalized);
+    || /(quote|rate|pricing|price|fee|budget|negotiat|paid|offer|agreement|contract|payment|complaint|legal|safety)/.test(normalized);
 }
 
 export function requiresNoReplyIntent(intent) {

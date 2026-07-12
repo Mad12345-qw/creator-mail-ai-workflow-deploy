@@ -78,4 +78,19 @@ if (verificationResult.action !== "no_reply") {
   throw new Error(`Expected verification no_reply, got ${verificationResult.action}`);
 }
 
-console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action }));
+const paidOnlyResult = await processCreatorEmail({
+  email: { messageId: "guard-test-4", from: "creator@example.com", subject: "Collaboration", text: "I only accept paid collaborations." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "creator_reply_paid_only", riskLevel: "Low", action: "draft_reply", summary: "Paid only.", draftReply: "Thank you." };
+    }
+  },
+  ruleStore
+});
+
+if (paidOnlyResult.action !== "manual_review") {
+  throw new Error(`Expected paid-only manual_review, got ${paidOnlyResult.action}`);
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action }));

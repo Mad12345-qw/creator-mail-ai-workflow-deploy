@@ -628,6 +628,9 @@ function historicalPolicyViolation(email, result) {
   if (manualSignal && result.action !== "manual_review") {
     violations.push("manual-review email was not routed to manual_review");
   }
+  if (requiresManualReviewIntent(result.intent) && result.action !== "manual_review") {
+    violations.push("commercial or risk intent was not routed to manual_review");
+  }
   if (autoReplySignal && result.action !== "no_reply") {
     violations.push("automatic reply was not routed to no_reply");
   }
