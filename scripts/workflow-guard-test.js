@@ -32,7 +32,7 @@ const paidResult = await processCreatorEmail({
   feishu,
   openai: {
     async analyzeEmail() {
-      return { intent: "paid_collaboration_inquiry", riskLevel: "Low", action: "draft_reply", summary: "Paid inquiry.", draftReply: "Thank you." };
+      return { intent: "paid_collaboration_inquiry", riskLevel: "Low", action: "draft_reply", summary: "Paid inquiry.", draftReply: "" };
     }
   },
   ruleStore
@@ -43,6 +43,9 @@ if (paidResult.action !== "manual_review") {
 }
 if (!writes.some((write) => write.tableName === "approvalTasks")) {
   throw new Error("Expected an approval task to be created.");
+}
+if (!String(paidResult.analysis.draftReply || "").trim()) {
+  throw new Error("Expected missing manual-review draft to be repaired.");
 }
 
 const bounceResult = await processCreatorEmail({

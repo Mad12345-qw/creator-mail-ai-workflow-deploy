@@ -19,7 +19,7 @@ export function requiresManualReviewIntent(intent) {
 function requiresNoReplyIntent(intent) {
   const normalized = String(intent || "").trim().toLowerCase();
   return normalized === "auto_reply"
-    || /(test_message|test_email|bounce|delivery_failure|delivery_status|forward_verification_notification)/.test(normalized);
+    || /(test_message|test_email|bounce|delivery_failure|delivery_status|verification_notification)/.test(normalized);
 }
 
 function inferIntent(email) {
@@ -124,7 +124,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     fallbackAction: decideAction(fallbackIntent)
   };
 
-  const analysis = await openai.analyzeEmail(email, context);
+  let analysis = await openai.analyzeEmail(email, context);
   const intent = analysis.intent && analysis.intent !== "unconfigured" ? analysis.intent : fallbackIntent;
   const permittedActions = new Set(["no_reply", "record_only", "draft_reply", "manual_review"]);
   const requiredAction = requiresManualReviewIntent(intent) || requiresManualReviewIntent(fallbackIntent)
@@ -135,6 +135,21 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
       ? requiredAction
       : (permittedActions.has(analysis.action) ? analysis.action : requiredAction)
   );
+  if (["draft_reply", "manual_review"].includes(action) && !String(analysis.draftReply || "").trim()) {
+    const repaired = await openai.analyzeEmail(email, {
+      ...context,
+      draftRepair: {
+        required: true,
+        instruction: "Return a complete, cautious email draft. Do not invent or approve commercial terms."
+      },
+      previousAnalysis: analysis
+    });
+    analysis = {
+      ...analysis,
+      draftReply: String(repaired.draftReply || "").trim()
+        || "Thank you for your message. We have received the details and are reviewing them internally. We will follow up once the relevant terms have been confirmed."
+    };
+  }
 
   const logFields = {
     "邮件ID": email.messageId || "",
