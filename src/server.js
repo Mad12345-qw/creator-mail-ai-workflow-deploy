@@ -659,16 +659,29 @@ async function runHistoricalReplayAcceptance(limit = 20) {
   try {
     const userToken = await getUserToken();
     if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
-    const data = await feishu.listMailboxMessages({
-      accessToken: userToken.accessToken,
-      folderId: config.feishu.inboxFolderId,
-      pageSize: limit
-    });
-    const messages = (data.items || data.messages || []).slice(0, limit);
+    const messages = [];
+    let pageToken = "";
+    while (messages.length < limit) {
+      const pageSize = Math.min(20, limit - messages.length);
+      const data = await feishu.listMailboxMessages({
+        accessToken: userToken.accessToken,
+        folderId: config.feishu.inboxFolderId,
+        pageSize,
+        pageToken
+      });
+      const pageItems = data.items || data.messages || [];
+      messages.push(...pageItems);
+      const nextPageToken = String(data.page_token || data.pageToken || "");
+      if (!data.has_more || !nextPageToken || !pageItems.length) break;
+      pageToken = nextPageToken;
+    }
     const dryRunFeishu = dryRunFeishuClient();
     const results = [];
     const errors = [];
     const violations = [];
+    if (messages.length < limit) {
+      errors.push({ sample: 0, error: `Only ${messages.length} mailbox messages were available; ${limit} were requested.` });
+    }
     for (let index = 0; index < messages.length; index += 1) {
       const messageId = getMailboxMessageId(messages[index]);
       try {
@@ -705,7 +718,21 @@ async function runHistoricalReplayAcceptance(limit = 20) {
         updatedAt: new Date().toISOString()
       };
     }
-    const passed = errors.length === 0 && violations.length === 0 && results.length === messages.length;
+    const passed = errors.length === 0 && violations.length === 0 && results.length === limit;
+    const batches = [
+      { from: 1, to: Math.min(20, messages.length) },
+      ...(messages.length > 20 ? [{ from: 21, to: Math.min(40, messages.length) }] : [])
+    ].map((batch) => {
+      const batchResults = results.filter((item) => item.sample >= batch.from && item.sample <= batch.to);
+      const batchViolations = violations.filter((item) => item.sample >= batch.from && item.sample <= batch.to);
+      const batchErrors = errors.filter((item) => item.sample >= batch.from && item.sample <= batch.to);
+      return {
+        range: `${batch.from}-${batch.to}`,
+        processed: batch.to - batch.from + 1,
+        passed: batchResults.filter((item) => item.passed).length,
+        failed: batchViolations.length + batchErrors.length
+      };
+    });
     historicalReplayAcceptance = {
       status: passed ? "passed" : "failed",
       requested: limit,
@@ -713,11 +740,12 @@ async function runHistoricalReplayAcceptance(limit = 20) {
       writesSuppressed: true,
       sendsSuppressed: true,
       passedSamples: results.filter((item) => item.passed).length,
-      failedSamples: messages.length - results.filter((item) => item.passed).length,
+      failedSamples: limit - results.filter((item) => item.passed).length,
       actionCounts: results.reduce((counts, item) => {
         counts[item.action] = (counts[item.action] || 0) + 1;
         return counts;
       }, {}),
+      batches,
       results,
       violations,
       errors,
@@ -1239,7 +1267,7 @@ server.listen(config.port, () => {
     ensureClientIntakeTable()
       .then(() => runClientLiveAcceptance())
       .then(() => auditApprovalQueue())
-      .then(() => runHistoricalReplayAcceptance(20))
+      .then(() => runHistoricalReplayAcceptance(40))
       .catch(async (error) => {
         await recordClientIntakeSetup({ status: "failed", error: error.message });
         console.error("Client intake setup failed:", error.message);
