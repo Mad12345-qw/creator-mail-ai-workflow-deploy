@@ -4,7 +4,7 @@
     {
       "id": "system-delivery-notice",
       "name": "System delivery notice",
-      "match": ["delivery status notification", "undelivered mail", "mail delivery failed"],
+      "match": ["delivery status notification", "undelivered mail", "mail delivery failed", "message delivery failed", "email forwarding verification"],
       "action": "no_reply",
       "notes": "Record only."
     },

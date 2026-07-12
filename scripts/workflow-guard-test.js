@@ -26,36 +26,38 @@ const feishu = {
   }
 };
 
-const openai = {
-  async analyzeEmail() {
-    return {
-      intent: "paid_collaboration_inquiry",
-      riskLevel: "Low",
-      action: "draft_reply",
-      summary: "Creator is asking about paid collaboration.",
-      draftReply: "Thank you for reaching out."
-    };
-  }
-};
-
 const ruleStore = { async load() { return {}; } };
-const result = await processCreatorEmail({
-  email: {
-    messageId: "guard-test-1",
-    from: "creator@example.com",
-    subject: "Paid collaboration",
-    text: "I would like to discuss a paid collaboration."
-  },
+const paidResult = await processCreatorEmail({
+  email: { messageId: "guard-test-1", from: "creator@example.com", subject: "Paid collaboration", text: "I would like to discuss a paid collaboration." },
   feishu,
-  openai,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "paid_collaboration_inquiry", riskLevel: "Low", action: "draft_reply", summary: "Paid inquiry.", draftReply: "Thank you." };
+    }
+  },
   ruleStore
 });
 
-if (result.action !== "manual_review") {
-  throw new Error(`Expected manual_review, got ${result.action}`);
+if (paidResult.action !== "manual_review") {
+  throw new Error(`Expected manual_review, got ${paidResult.action}`);
 }
 if (!writes.some((write) => write.tableName === "approvalTasks")) {
   throw new Error("Expected an approval task to be created.");
 }
 
-console.log(JSON.stringify({ ok: true, action: result.action, approvalCreated: true }));
+const bounceResult = await processCreatorEmail({
+  email: { messageId: "guard-test-2", from: "mailer-daemon@example.com", subject: "Delivery failure", text: "Message delivery failed." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "bounce_or_delivery_failure", riskLevel: "Low", action: "draft_reply", summary: "Delivery failed.", draftReply: "" };
+    }
+  },
+  ruleStore
+});
+
+if (bounceResult.action !== "no_reply") {
+  throw new Error(`Expected no_reply, got ${bounceResult.action}`);
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action }));

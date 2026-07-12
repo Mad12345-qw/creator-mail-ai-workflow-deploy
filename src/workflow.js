@@ -16,6 +16,12 @@ export function requiresManualReviewIntent(intent) {
     || /(quote|rate|pricing|price|fee|budget|negotiat|paid[_ -]?collaboration|agreement|contract|payment|complaint|legal|safety)/.test(normalized);
 }
 
+function requiresNoReplyIntent(intent) {
+  const normalized = String(intent || "").trim().toLowerCase();
+  return normalized === "auto_reply"
+    || /(test_message|test_email|bounce|delivery_failure|delivery_status|forward_verification_notification)/.test(normalized);
+}
+
 function inferIntent(email) {
   const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
   if (/\brate card\b|\brate\b|quote|price|fee|budget|package/.test(text)) return "quote";
@@ -28,7 +34,7 @@ function inferIntent(email) {
 }
 
 function decideAction(intent) {
-  if (intent === "auto_reply") return "no_reply";
+  if (requiresNoReplyIntent(intent)) return "no_reply";
   if (intent === "stop_contact") return "record_only";
   if (requiresManualReviewIntent(intent)) return "manual_review";
   return "draft_reply";
@@ -125,8 +131,8 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     ? "manual_review"
     : decideAction(intent);
   const action = matchedRule?.action || (
-    requiredAction === "manual_review"
-      ? "manual_review"
+    ["manual_review", "no_reply", "record_only"].includes(requiredAction)
+      ? requiredAction
       : (permittedActions.has(analysis.action) ? analysis.action : requiredAction)
   );
 
