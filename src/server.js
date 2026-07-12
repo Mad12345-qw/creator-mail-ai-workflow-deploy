@@ -6,7 +6,7 @@ import { OpenAIClient } from "./openaiClient.js";
 import { RedisStore } from "./redisStore.js";
 import { RuleStore } from "./ruleStore.js";
 import { getPathAndQuery, readJson, sendJson, sendRedirect, sendText } from "./http.js";
-import { processCreatorEmail } from "./workflow.js";
+import { processCreatorEmail, requiresManualReviewIntent } from "./workflow.js";
 
 const config = getConfig();
 const feishu = new FeishuClient(config);
@@ -20,6 +20,7 @@ let clientIntakeSetup = { status: "not_started" };
 let clientLiveAcceptance = { status: "not_started" };
 let approvalQueueAudit = { status: "not_started" };
 let mailboxInboxAudit = { status: "not_started" };
+let manualReviewReconciliation = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -556,6 +557,67 @@ async function auditMailboxInbox() {
   return mailboxInboxAudit;
 }
 
+async function reconcileManualReviewLogs() {
+  manualReviewReconciliation = { status: "running", updatedAt: new Date().toISOString() };
+  try {
+    const [logsData, tasksData] = await Promise.all([
+      feishu.listBitableRecords("emailLog", 100),
+      feishu.listBitableRecords("approvalTasks", 100)
+    ]);
+    const taskMessageIds = new Set(
+      (tasksData.items || []).map((task) => String(task.fields?.["关联邮件ID"] || "")).filter(Boolean)
+    );
+    let correctedLogs = 0;
+    let createdTasks = 0;
+    for (const record of logsData.items || []) {
+      const fields = record.fields || {};
+      const intent = String(fields["AI识别类型"] || "");
+      const action = String(fields["处理动作"] || "");
+      const messageId = String(fields["邮件ID"] || "");
+      if (!messageId || action === "manual_review" || !requiresManualReviewIntent(intent)) continue;
+
+      await feishu.updateBitableRecord("emailLog", record.record_id, {
+        "处理动作": "manual_review",
+        "风险等级": "High",
+        "处理状态": "待人工确认"
+      });
+      correctedLogs += 1;
+      if (taskMessageIds.has(messageId)) continue;
+      await feishu.createBitableRecord("approvalTasks", {
+        "任务标题": `Review creator email: ${String(fields["邮件主题"] || "(no subject)")}`,
+        "任务类型": "邮件人工确认",
+        "风险等级": "High",
+        "AI建议": String(fields["AI摘要"] || "Manual review required."),
+        "AI草稿": String(fields["AI草稿"] || ""),
+        "人工修改稿": "",
+        "是否允许发送": false,
+        "任务状态": "待处理",
+        "负责人": "",
+        "人工备注": "",
+        "关联邮件ID": messageId
+      });
+      taskMessageIds.add(messageId);
+      createdTasks += 1;
+    }
+    manualReviewReconciliation = {
+      status: "complete",
+      correctedLogs,
+      createdTasks,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    manualReviewReconciliation = {
+      status: "failed",
+      correctedLogs: 0,
+      createdTasks: 0,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return manualReviewReconciliation;
+}
+
 async function processApprovedTasks() {
   const tasksData = await feishu.listBitableRecords("approvalTasks", 100);
   const candidates = (tasksData.items || []).filter((task) => {
@@ -647,6 +709,7 @@ async function processApprovedTasks() {
 
 async function runMailboxWork(reason) {
   const poll = await pollMailbox();
+  await reconcileManualReviewLogs();
   const approvals = await processApprovedTasks();
   await auditApprovalQueue();
   await auditMailboxInbox();
@@ -970,6 +1033,7 @@ async function route(req, res) {
       clientLiveAcceptance,
       approvalQueueAudit,
       mailboxInboxAudit,
+      manualReviewReconciliation,
       missingConfig: getMissingConfig(config)
     });
   }

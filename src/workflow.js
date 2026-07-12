@@ -10,6 +10,12 @@ const MANUAL_INTENTS = new Set([
   "safety"
 ]);
 
+export function requiresManualReviewIntent(intent) {
+  const normalized = String(intent || "").trim().toLowerCase();
+  return MANUAL_INTENTS.has(normalized)
+    || /(quote|rate|pricing|price|fee|budget|negotiat|paid[_ -]?collaboration|agreement|contract|payment|complaint|legal|safety)/.test(normalized);
+}
+
 function inferIntent(email) {
   const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
   if (/\brate card\b|\brate\b|quote|price|fee|budget|package/.test(text)) return "quote";
@@ -24,7 +30,7 @@ function inferIntent(email) {
 function decideAction(intent) {
   if (intent === "auto_reply") return "no_reply";
   if (intent === "stop_contact") return "record_only";
-  if (MANUAL_INTENTS.has(intent)) return "manual_review";
+  if (requiresManualReviewIntent(intent)) return "manual_review";
   return "draft_reply";
 }
 
@@ -115,7 +121,9 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
   const analysis = await openai.analyzeEmail(email, context);
   const intent = analysis.intent && analysis.intent !== "unconfigured" ? analysis.intent : fallbackIntent;
   const permittedActions = new Set(["no_reply", "record_only", "draft_reply", "manual_review"]);
-  const requiredAction = decideAction(intent);
+  const requiredAction = requiresManualReviewIntent(intent) || requiresManualReviewIntent(fallbackIntent)
+    ? "manual_review"
+    : decideAction(intent);
   const action = matchedRule?.action || (
     requiredAction === "manual_review"
       ? "manual_review"
