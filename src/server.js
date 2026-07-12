@@ -1868,7 +1868,7 @@ server.listen(config.port, () => {
       .then(() => reconcileMissingDrafts(40))
       .then(() => reconcileManualReviewLogs())
       .then(() => auditDataIntegrity())
-      .then(() => runHistoricalReplayAcceptance(40, 40))
+      .then(() => runHistoricalReplayAcceptance(40, 80))
       .catch((error) => {
         console.error("Startup validation failed:", error.message);
       });
