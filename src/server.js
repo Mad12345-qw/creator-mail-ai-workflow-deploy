@@ -6,7 +6,7 @@ import { OpenAIClient } from "./openaiClient.js";
 import { RedisStore } from "./redisStore.js";
 import { RuleStore } from "./ruleStore.js";
 import { getPathAndQuery, readJson, sendJson, sendRedirect, sendText } from "./http.js";
-import { processCreatorEmail, requiresManualReviewIntent } from "./workflow.js";
+import { processCreatorEmail, requiresManualReviewIntent, requiresNoReplyIntent } from "./workflow.js";
 
 const config = getConfig();
 const feishu = new FeishuClient(config);
@@ -633,6 +633,9 @@ function historicalPolicyViolation(email, result) {
   }
   if (stopContactSignal && result.action !== "record_only") {
     violations.push("stop-contact email was not routed to record_only");
+  }
+  if (requiresNoReplyIntent(result.intent) && result.action !== "no_reply") {
+    violations.push("system or verification email was not routed to no_reply");
   }
   if (["draft_reply", "manual_review"].includes(result.action) && !String(result.analysis?.draftReply || "").trim()) {
     violations.push("actionable email did not produce a draft");

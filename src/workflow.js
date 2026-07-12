@@ -16,10 +16,10 @@ export function requiresManualReviewIntent(intent) {
     || /(quote|rate|pricing|price|fee|budget|negotiat|paid[_ -]?collaboration|agreement|contract|payment|complaint|legal|safety)/.test(normalized);
 }
 
-function requiresNoReplyIntent(intent) {
+export function requiresNoReplyIntent(intent) {
   const normalized = String(intent || "").trim().toLowerCase();
   return normalized === "auto_reply"
-    || /(test_message|test_email|bounce|delivery_failure|delivery_status|verification_notification)/.test(normalized);
+    || /(test_message|test_email|bounce|delivery_failure|delivery_status|verification_notification|email_forwarding_verification|email_verification)/.test(normalized);
 }
 
 function inferIntent(email) {

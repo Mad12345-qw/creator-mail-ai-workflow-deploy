@@ -63,4 +63,19 @@ if (bounceResult.action !== "no_reply") {
   throw new Error(`Expected no_reply, got ${bounceResult.action}`);
 }
 
-console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action }));
+const verificationResult = await processCreatorEmail({
+  email: { messageId: "guard-test-3", from: "system@example.com", subject: "Forwarding verification", text: "Confirm email forwarding." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "email_forwarding_verification", riskLevel: "Low", action: "draft_reply", summary: "Verification notice.", draftReply: "" };
+    }
+  },
+  ruleStore
+});
+
+if (verificationResult.action !== "no_reply") {
+  throw new Error(`Expected verification no_reply, got ${verificationResult.action}`);
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action }));
