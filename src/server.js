@@ -414,6 +414,21 @@ async function auditApprovalQueue() {
     const logsByMessageId = new Map(
       (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record.fields || {}])
     );
+    const latestEmailLogs = (logsData.items || [])
+      .slice()
+      .sort((left, right) => Number(right.created_time || 0) - Number(left.created_time || 0))
+      .slice(0, 5)
+      .map((record) => {
+        const fields = record.fields || {};
+        return {
+          createdAt: normalizeMailTime(record.created_time),
+          emailType: String(fields["AI识别类型"] || ""),
+          action: String(fields["处理动作"] || ""),
+          status: String(fields["处理状态"] || ""),
+          hasDraft: Boolean(String(fields["AI草稿"] || "").trim()),
+          testRecord: isKnownTestEmail(fields)
+        };
+      });
     const tasks = tasksData.items || [];
     let testRecords = 0;
     let realRecords = 0;
@@ -436,10 +451,12 @@ async function auditApprovalQueue() {
     approvalQueueAudit = {
       status: "complete",
       totalRecords: tasks.length,
+      totalEmailLogs: (logsData.items || []).length,
       testRecords,
       realRecords,
       unknownRecords,
       statusCounts,
+      latestEmailLogs,
       readOnly: true,
       updatedAt: new Date().toISOString(),
       error: ""
