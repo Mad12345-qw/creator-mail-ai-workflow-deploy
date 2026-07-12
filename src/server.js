@@ -861,6 +861,18 @@ function historicalPolicyViolation(email, result) {
 }
 
 async function runHistoricalReplayAcceptance(limit = 20) {
+  const cacheKey = "historical-replay-40-20260712-v1";
+  if (redis.isConfigured()) {
+    try {
+      const cached = await redis.getJson(cacheKey);
+      if (cached?.status === "passed" && Number(cached.processed || 0) >= limit) {
+        historicalReplayAcceptance = { ...cached, cached: true };
+        return historicalReplayAcceptance;
+      }
+    } catch (error) {
+      console.error("Historical replay cache read failed:", error.message);
+    }
+  }
   historicalReplayAcceptance = {
     status: "running",
     requested: limit,
@@ -977,6 +989,13 @@ async function runHistoricalReplayAcceptance(limit = 20) {
       error: error.message
     };
   }
+  if (historicalReplayAcceptance.status === "passed" && redis.isConfigured()) {
+    try {
+      await redis.setJson(cacheKey, historicalReplayAcceptance, { ex: 60 * 60 * 24 * 30 });
+    } catch (error) {
+      console.error("Historical replay cache write failed:", error.message);
+    }
+  }
   return historicalReplayAcceptance;
 }
 
@@ -1071,8 +1090,6 @@ async function processApprovedTasks() {
 
 async function runMailboxWork(reason) {
   const poll = await pollMailbox();
-  await reconcileMissingSenderAddresses(40);
-  await reconcileMissingDrafts(40);
   await reconcileManualReviewLogs();
   const approvals = await processApprovedTasks();
   await auditApprovalQueue();
@@ -1482,6 +1499,8 @@ server.listen(config.port, () => {
     ensureClientIntakeTable()
       .then(() => runClientLiveAcceptance())
       .then(() => auditApprovalQueue())
+      .then(() => reconcileMissingSenderAddresses(40))
+      .then(() => reconcileMissingDrafts(40))
       .then(() => runHistoricalReplayAcceptance(40))
       .catch(async (error) => {
         await recordClientIntakeSetup({ status: "failed", error: error.message });
