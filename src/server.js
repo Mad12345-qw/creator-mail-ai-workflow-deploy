@@ -24,10 +24,30 @@ let manualReviewReconciliation = { status: "not_started" };
 let historicalReplayAcceptance = { status: "not_started" };
 let senderAddressReconciliation = { status: "not_started" };
 let missingDraftReconciliation = { status: "not_started" };
+let dataIntegrityAudit = { status: "not_started" };
+let operationalSchemaAudit = { status: "not_started" };
+let historicalContextReconciliation = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
 const CLIENT_WIKI_URL = "https://zcn1ftnw54fl.feishu.cn/wiki/H0tkwIRmYiQ1wnks74Nc2m4kn5e";
+const MAILBOX_POLL_SCAN_LIMIT = 500;
+const OPERATIONAL_TABLE_FIELDS = {
+  emailLog: [
+    { field_name: "邮件正文", type: 1 },
+    { field_name: "收件人邮箱", type: 1 },
+    { field_name: "接收时间", type: 1 },
+    { field_name: "匹配项目", type: 1 },
+    { field_name: "命中规则", type: 1 },
+    { field_name: "数据完整性", type: 1 }
+  ],
+  approvalTasks: [
+    { field_name: "发件人邮箱", type: 1 },
+    { field_name: "原邮件主题", type: 1 },
+    { field_name: "原邮件正文", type: 1 },
+    { field_name: "匹配项目", type: 1 }
+  ]
+};
 const CLIENT_INTAKE_FIELDS = [
   {
     field_name: "项目状态",
@@ -217,58 +237,169 @@ function getMailboxMessageId(message) {
   return message?.message_id || message?.id || "";
 }
 
+function getBitableRecordId(result) {
+  return result?.data?.record?.record_id || result?.record?.record_id || result?.record_id || "";
+}
+
 function mapMailboxMessage(message, fallbackMessageId) {
   const source = message.message || message;
   const body = source.body_plain_text || source.body_text || source.body || source.body_html || "";
   return {
     messageId: source.message_id || source.id || fallbackMessageId,
     from: readSourceAddress(source, "from"),
+    to: readSourceAddress(source, "to"),
     subject: source.subject || "",
-    text: typeof body === "string" ? body : body.plain_text || body.text || body.html || ""
+    text: typeof body === "string" ? body : body.plain_text || body.text || body.html || "",
+    receivedAt: normalizeMailTime(source.received_time || source.sent_time || source.created_time)
   };
+}
+
+async function listMailboxHistory(userToken, limit = 100) {
+  const messages = [];
+  let pageToken = "";
+  while (messages.length < limit) {
+    const data = await feishu.listMailboxMessages({
+      accessToken: userToken.accessToken,
+      folderId: config.feishu.inboxFolderId,
+      pageSize: Math.min(20, limit - messages.length),
+      pageToken
+    });
+    const pageItems = data.items || data.messages || [];
+    messages.push(...pageItems);
+    const nextPageToken = String(data.page_token || data.pageToken || "");
+    if (!data.has_more || !nextPageToken || !pageItems.length) break;
+    pageToken = nextPageToken;
+  }
+  return messages;
+}
+
+async function listMailboxDelta(userToken, limit = 500) {
+  const messages = [];
+  let pageToken = "";
+  while (messages.length < limit) {
+    const data = await feishu.listMailboxMessages({
+      accessToken: userToken.accessToken,
+      folderId: config.feishu.inboxFolderId,
+      pageSize: Math.min(20, limit - messages.length),
+      pageToken
+    });
+    const pageItems = data.items || data.messages || [];
+    messages.push(...pageItems);
+    const processedStates = await Promise.all(
+      pageItems.map((item) => {
+        const messageId = getMailboxMessageId(item);
+        return messageId ? redis.exists(`polled-mail:${messageId}`) : Promise.resolve(true);
+      })
+    );
+    if (pageItems.length && processedStates.every(Boolean)) break;
+    const nextPageToken = String(data.page_token || data.pageToken || "");
+    if (!data.has_more || !nextPageToken || !pageItems.length) break;
+    pageToken = nextPageToken;
+  }
+  return messages;
+}
+
+async function processMailboxMessageOnce({ messageId, mailboxId = "me", userToken, existingLogsByMessageId = null }) {
+  if (!messageId) throw new Error("Mailbox message id is missing.");
+  const processedKey = `polled-mail:${messageId}`;
+  if (await redis.exists(processedKey)) return { status: "already_processed" };
+
+  const lockName = `mail-message-lock:${messageId}`;
+  const lockToken = randomUUID();
+  const locked = redis.isConfigured() ? await redis.acquireLock(lockName, lockToken, 300) : true;
+  if (!locked) return { status: "already_processing" };
+  try {
+    if (await redis.exists(processedKey)) return { status: "already_processed" };
+    let existingLog = existingLogsByMessageId?.get(messageId) || null;
+    if (!existingLog) {
+      const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
+      existingLog = (logsData.items || []).find((record) => String(record.fields?.["邮件ID"] || "") === messageId) || null;
+    }
+    if (existingLog) {
+      await redis.set(processedKey, "1", { ex: 60 * 60 * 24 * 90 });
+      return { status: "existing_log_recovered", existingLog };
+    }
+
+    const fullMessage = await feishu.getMailboxMessage({
+      userMailboxId: mailboxId,
+      messageId,
+      accessToken: userToken.accessToken
+    });
+    const email = mapMailboxMessage(fullMessage, messageId);
+    if (!email.from) throw new Error("Mailbox message sender address could not be parsed.");
+    if (!email.subject && !email.text) throw new Error("Mailbox message has no readable subject or body.");
+
+    const result = await processCreatorEmail({ email, feishu, openai, ruleStore });
+    if (!getBitableRecordId(result.writeResult)) {
+      throw new Error("Email log write did not return a record id.");
+    }
+    await redis.set(processedKey, "1", { ex: 60 * 60 * 24 * 90 });
+    if (existingLogsByMessageId) existingLogsByMessageId.set(messageId, result.writeResult);
+    return { status: "processed", result };
+  } finally {
+    if (redis.isConfigured()) await redis.releaseLock(lockName, lockToken).catch(() => {});
+  }
 }
 
 async function pollMailbox() {
   const userToken = await getUserToken();
   if (!userToken) return { status: "authorization_required" };
 
-  const data = await feishu.listMailboxMessages({
-    accessToken: userToken.accessToken,
-    folderId: config.feishu.inboxFolderId,
-    pageSize: 20
-  });
-  const messages = data.items || data.messages || [];
+  const initializedKey = "mailbox-poll-initialized-v3";
+  const previousInitializedKey = "mailbox-poll-initialized-v2";
+  const initialized = await redis.exists(initializedKey);
+  const messages = initialized
+    ? await listMailboxDelta(userToken, MAILBOX_POLL_SCAN_LIMIT)
+    : await listMailboxHistory(userToken, MAILBOX_POLL_SCAN_LIMIT);
   const messageIds = messages.map(getMailboxMessageId).filter(Boolean);
-  const initializedKey = "mailbox-poll-initialized-v2";
+  const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
+  const existingLogsByMessageId = new Map(
+    (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record])
+  );
 
-  if (!(await redis.exists(initializedKey))) {
-    for (const messageId of messageIds) {
-      await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
+  if (!initialized) {
+    if (await redis.exists(previousInitializedKey)) {
+      for (let index = 0; index < messages.length; index += 1) {
+        const messageId = getMailboxMessageId(messages[index]);
+        if (!messageId) continue;
+        if (index >= 20 || existingLogsByMessageId.has(messageId)) {
+          await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
+        }
+      }
+      await redis.set(initializedKey, `migrated:${new Date().toISOString()}`);
+    } else {
+      for (const messageId of messageIds) {
+        await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
+      }
+      await redis.set(initializedKey, new Date().toISOString());
+      lastMailboxPoll = { status: "baseline_created", seen: messageIds.length, updatedAt: new Date().toISOString() };
+      return lastMailboxPoll;
     }
-    await redis.set(initializedKey, new Date().toISOString());
-    lastMailboxPoll = { status: "baseline_created", seen: messageIds.length, updatedAt: new Date().toISOString() };
-    return lastMailboxPoll;
   }
 
   const processed = [];
+  const recovered = [];
+  const failures = [];
   for (const message of messages.slice().reverse()) {
     const messageId = getMailboxMessageId(message);
     if (!messageId || (await redis.exists(`polled-mail:${messageId}`))) continue;
-    const fullMessage = await feishu.getMailboxMessage({
-      userMailboxId: "me",
-      messageId,
-      accessToken: userToken.accessToken
-    });
-    await processCreatorEmail({
-      email: mapMailboxMessage(fullMessage, messageId),
-      feishu,
-      openai,
-      ruleStore
-    });
-    await redis.set(`polled-mail:${messageId}`, "1", { ex: 60 * 60 * 24 * 90 });
-    processed.push(messageId);
+    try {
+      const outcome = await processMailboxMessageOnce({ messageId, userToken, existingLogsByMessageId });
+      if (outcome.status === "processed") processed.push(messageId);
+      if (outcome.status === "existing_log_recovered") recovered.push(messageId);
+    } catch (error) {
+      failures.push(error.message);
+    }
   }
-  lastMailboxPoll = { status: "completed", processed: processed.length, updatedAt: new Date().toISOString() };
+  lastMailboxPoll = {
+    status: failures.length ? "completed_with_errors" : "completed",
+    scanned: messages.length,
+    processed: processed.length,
+    recovered: recovered.length,
+    failed: failures.length,
+    error: failures[0] || "",
+    updatedAt: new Date().toISOString()
+  };
   return lastMailboxPoll;
 }
 
@@ -360,6 +491,40 @@ async function ensureClientIntakeTable() {
   return clientIntakeSetup;
 }
 
+async function ensureOperationalTableFields() {
+  operationalSchemaAudit = { status: "checking", createdFields: [], updatedAt: new Date().toISOString() };
+  try {
+    const createdFields = [];
+    for (const [tableName, fields] of Object.entries(OPERATIONAL_TABLE_FIELDS)) {
+      const tableId = await feishu.resolveBitableTableId(tableName);
+      if (!tableId) throw new Error(`Operational table is not configured: ${tableName}`);
+      const fieldsData = await feishu.listBitableFields(tableId, 100);
+      const existingNames = new Set(
+        (fieldsData.items || []).map((item) => String(item.field_name || item.name || ""))
+      );
+      for (const field of fields) {
+        if (existingNames.has(field.field_name)) continue;
+        await feishu.createBitableField(tableId, field);
+        createdFields.push(`${tableName}.${field.field_name}`);
+      }
+    }
+    operationalSchemaAudit = {
+      status: "complete",
+      createdFields,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    operationalSchemaAudit = {
+      status: "failed",
+      createdFields: [],
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return operationalSchemaAudit;
+}
+
 function hasProjectIdentity(record) {
   const fields = record?.fields || {};
   return [fields["品牌名称"], fields["产品名称"], fields["项目名称"]]
@@ -381,7 +546,7 @@ function dryRunFeishuClient() {
 async function runClientLiveAcceptance() {
   clientLiveAcceptance = { status: "running", updatedAt: new Date().toISOString() };
   try {
-    const data = await feishu.listBitableRecords("projectProducts", 100);
+    const data = await feishu.listAllBitableRecords("projectProducts", { maxRecords: 1000 });
     const records = (data.items || []).filter(hasProjectIdentity);
     if (!records.length) throw new Error("No completed client project record was found.");
 
@@ -457,8 +622,10 @@ function isKnownTestEmail(fields) {
   const messageId = String(fields["邮件ID"] || "").toLowerCase();
   const subject = String(fields["邮件主题"] || "").toLowerCase();
   const sender = String(fields["发件人邮箱"] || "").trim().toLowerCase();
-  return messageId.includes("acceptance")
+  return /^(sample-|rule-verification|creator-match-verification|outbound-approval-verification|guard-test)/.test(messageId)
+    || messageId.includes("acceptance")
     || /\btest\b|测试|polling final check|polling test ready|mail event test/.test(subject)
+    || /@example\.com$/.test(sender)
     || config.testRecipients.includes(sender);
 }
 
@@ -466,8 +633,8 @@ async function auditApprovalQueue() {
   approvalQueueAudit = { status: "running", updatedAt: new Date().toISOString() };
   try {
     const [tasksData, logsData] = await Promise.all([
-      feishu.listBitableRecords("approvalTasks", 100),
-      feishu.listBitableRecords("emailLog", 100)
+      feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 }),
+      feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 })
     ]);
     const logsByMessageId = new Map(
       (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record.fields || {}])
@@ -554,7 +721,7 @@ async function auditMailboxInbox() {
         folderId: config.feishu.inboxFolderId,
         pageSize: 20
       }),
-      feishu.listBitableRecords("emailLog", 100)
+      feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 })
     ]);
     const messages = mailData.items || mailData.messages || [];
     const logsByMessageId = new Map(
@@ -621,7 +788,7 @@ async function reconcileMissingSenderAddresses(limit = 40) {
   try {
     const userToken = await getUserToken();
     if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
-    const logsData = await feishu.listBitableRecords("emailLog", 100);
+    const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
     const blankLogs = (logsData.items || []).filter((record) => !String(record.fields?.["发件人邮箱"] || "").trim());
     const messages = [];
     let pageToken = "";
@@ -687,8 +854,8 @@ async function reconcileMissingDrafts(limit = 40) {
     const userToken = await getUserToken();
     if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
     const [logsData, tasksData] = await Promise.all([
-      feishu.listBitableRecords("emailLog", 100),
-      feishu.listBitableRecords("approvalTasks", 100)
+      feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 }),
+      feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 })
     ]);
     const blankLogs = (logsData.items || []).filter((record) => {
       const fields = record.fields || {};
@@ -766,12 +933,89 @@ async function reconcileMissingDrafts(limit = 40) {
   return missingDraftReconciliation;
 }
 
+async function reconcileHistoricalContext(limit = 40) {
+  historicalContextReconciliation = { status: "running", scanned: 0, corrected: 0, updatedAt: new Date().toISOString() };
+  try {
+    const userToken = await getUserToken();
+    if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
+    const [logsData, tasksData] = await Promise.all([
+      feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 }),
+      feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 })
+    ]);
+    const messages = await listMailboxHistory(userToken, limit);
+    const messageIds = new Set(messages.map(getMailboxMessageId).filter(Boolean));
+    const tasksByMessageId = new Map(
+      (tasksData.items || []).map((task) => [String(task.fields?.["关联邮件ID"] || ""), task])
+    );
+    const dryRunFeishu = dryRunFeishuClient();
+    let corrected = 0;
+    let unresolved = 0;
+    for (const record of logsData.items || []) {
+      const messageId = String(record.fields?.["邮件ID"] || "");
+      if (!messageId || !messageIds.has(messageId)) {
+        unresolved += 1;
+        continue;
+      }
+      const fullMessage = await feishu.getMailboxMessage({
+        userMailboxId: "me",
+        messageId,
+        accessToken: userToken.accessToken
+      });
+      const email = mapMailboxMessage(fullMessage, messageId);
+      const result = await processCreatorEmail({ email, feishu: dryRunFeishu, openai, ruleStore });
+      const matchedProjectText = (result.projectMatches || [])
+        .map((project) => [project.brand, project.product, project.campaign].filter(Boolean).join(" / "))
+        .filter(Boolean)
+        .join("; ");
+      const updateFields = {
+        "发件人邮箱": email.from || "",
+        "收件人邮箱": email.to || "",
+        "邮件主题": email.subject || "",
+        "邮件正文": String(email.text || "").slice(0, 20000),
+        "接收时间": email.receivedAt || "",
+        "匹配项目": matchedProjectText,
+        "命中规则": result.matchedRule || "",
+        "数据完整性": email.from && (email.subject || email.text) ? "complete" : "incomplete_source"
+      };
+      await feishu.updateBitableRecord("emailLog", record.record_id, updateFields);
+      const task = tasksByMessageId.get(messageId);
+      if (task?.record_id) {
+        await feishu.updateBitableRecord("approvalTasks", task.record_id, {
+          "发件人邮箱": email.from || "",
+          "原邮件主题": email.subject || "",
+          "原邮件正文": String(email.text || "").slice(0, 20000),
+          "匹配项目": matchedProjectText
+        });
+      }
+      corrected += 1;
+    }
+    historicalContextReconciliation = {
+      status: "complete",
+      scanned: (logsData.items || []).length,
+      corrected,
+      unresolved,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    historicalContextReconciliation = {
+      status: "failed",
+      scanned: 0,
+      corrected: 0,
+      unresolved: 0,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return historicalContextReconciliation;
+}
+
 async function reconcileManualReviewLogs() {
   manualReviewReconciliation = { status: "running", updatedAt: new Date().toISOString() };
   try {
     const [logsData, tasksData] = await Promise.all([
-      feishu.listBitableRecords("emailLog", 100),
-      feishu.listBitableRecords("approvalTasks", 100)
+      feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 }),
+      feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 })
     ]);
     const taskMessageIds = new Set(
       (tasksData.items || []).map((task) => String(task.fields?.["关联邮件ID"] || "")).filter(Boolean)
@@ -827,6 +1071,93 @@ async function reconcileManualReviewLogs() {
   return manualReviewReconciliation;
 }
 
+async function auditDataIntegrity() {
+  dataIntegrityAudit = { status: "running", updatedAt: new Date().toISOString() };
+  try {
+    const [logsData, tasksData] = await Promise.all([
+      feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 }),
+      feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 })
+    ]);
+    const logs = logsData.items || [];
+    const tasks = tasksData.items || [];
+    const productionLogs = logs.filter((record) => !isKnownTestEmail(record.fields || {}));
+    const productionMessageIds = new Set(
+      productionLogs.map((record) => String(record.fields?.["邮件ID"] || "")).filter(Boolean)
+    );
+    const allMessageIds = new Set(
+      logs.map((record) => String(record.fields?.["邮件ID"] || "")).filter(Boolean)
+    );
+    const productionTasks = tasks.filter((task) => productionMessageIds.has(String(task.fields?.["关联邮件ID"] || "")));
+    const logCounts = new Map();
+    const taskCounts = new Map();
+    for (const record of productionLogs) {
+      const messageId = String(record.fields?.["邮件ID"] || "");
+      if (messageId) logCounts.set(messageId, (logCounts.get(messageId) || 0) + 1);
+    }
+    for (const task of productionTasks) {
+      const messageId = String(task.fields?.["关联邮件ID"] || "");
+      if (messageId) taskCounts.set(messageId, (taskCounts.get(messageId) || 0) + 1);
+    }
+    const duplicateEmailLogs = [...logCounts.values()].filter((count) => count > 1).length;
+    const duplicateApprovalTasks = [...taskCounts.values()].filter((count) => count > 1).length;
+    const missingMessageIds = productionLogs.filter((record) => !String(record.fields?.["邮件ID"] || "")).length;
+    const missingSenders = productionLogs.filter((record) => !String(record.fields?.["发件人邮箱"] || "")).length;
+    const missingBodies = productionLogs.filter((record) => !String(record.fields?.["邮件正文"] || "").trim()).length;
+    const missingDrafts = productionLogs.filter((record) => {
+      const fields = record.fields || {};
+      return ["draft_reply", "manual_review"].includes(String(fields["处理动作"] || ""))
+        && !String(fields["AI草稿"] || "").trim();
+    }).length;
+    const manualLogsMissingApproval = productionLogs.filter((record) => {
+      const fields = record.fields || {};
+      const messageId = String(fields["邮件ID"] || "");
+      return String(fields["处理动作"] || "") === "manual_review" && messageId && !taskCounts.has(messageId);
+    }).length;
+    const orphanApprovalTasks = tasks.filter((task) => {
+      const messageId = String(task.fields?.["关联邮件ID"] || "");
+      return !messageId || !allMessageIds.has(messageId);
+    }).length;
+    const missingApprovalContext = productionTasks.filter((task) => {
+      const fields = task.fields || {};
+      return !String(fields["发件人邮箱"] || "")
+        || !String(fields["原邮件正文"] || "").trim()
+        || !String(fields["原邮件主题"] || "");
+    }).length;
+    const issues = {
+      duplicateEmailLogs,
+      duplicateApprovalTasks,
+      missingMessageIds,
+      missingSenders,
+      missingBodies,
+      missingDrafts,
+      manualLogsMissingApproval,
+      orphanApprovalTasks,
+      missingApprovalContext
+    };
+    const issueCount = Object.values(issues).reduce((sum, value) => sum + Number(value || 0), 0);
+    dataIntegrityAudit = {
+      status: issueCount === 0 ? "passed" : "failed",
+      emailLogs: logs.length,
+      productionEmailLogs: productionLogs.length,
+      testEmailLogs: logs.length - productionLogs.length,
+      approvalTasks: tasks.length,
+      issues,
+      issueCount,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    dataIntegrityAudit = {
+      status: "failed",
+      issues: {},
+      issueCount: -1,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return dataIntegrityAudit;
+}
+
 function historicalPolicyViolation(email, result) {
   const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
   const violations = [];
@@ -854,14 +1185,14 @@ function historicalPolicyViolation(email, result) {
   if (!["no_reply", "record_only", "draft_reply", "manual_review"].includes(result.action)) {
     violations.push("workflow returned an unsupported action");
   }
-  if (!(result.projectMatches || []).length) {
-    violations.push("no live project policy was supplied to the model");
+  if (!(result.projectMatches || []).length && !["manual_review", "no_reply", "record_only"].includes(result.action)) {
+    violations.push("unmatched project email was allowed to draft automatically");
   }
   return violations;
 }
 
 async function runHistoricalReplayAcceptance(limit = 20) {
-  const cacheKey = "historical-replay-40-20260712-v1";
+  const cacheKey = "historical-replay-40-20260712-v2";
   if (redis.isConfigured()) {
     try {
       const cached = await redis.getJson(cacheKey);
@@ -1000,15 +1331,17 @@ async function runHistoricalReplayAcceptance(limit = 20) {
 }
 
 async function processApprovedTasks() {
-  const tasksData = await feishu.listBitableRecords("approvalTasks", 100);
+  const tasksData = await feishu.listAllBitableRecords("approvalTasks", { maxRecords: 1000 });
   const candidates = (tasksData.items || []).filter((task) => {
     const fields = task.fields || {};
     const status = String(fields["任务状态"] || "");
-    return isChecked(fields["是否允许发送"]) && !["已发送", "发送失败"].includes(status);
+    const eligibleStatus = ["待处理", "待人工确认", "已批准", "待发送"].includes(status)
+      || (!config.safeTestMode && status === "安全模式拦截");
+    return isChecked(fields["是否允许发送"]) && eligibleStatus;
   });
-  if (!candidates.length) return { checked: 0, sent: 0, safeModeSkipped: 0 };
+  if (!candidates.length) return { checked: 0, sent: 0, failed: 0, safeModeSkipped: 0 };
 
-  const logsData = await feishu.listBitableRecords("emailLog", 100);
+  const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
   const logsByMessageId = new Map(
     (logsData.items || []).map((record) => [String(record.fields?.["邮件ID"] || ""), record])
   );
@@ -1016,6 +1349,7 @@ async function processApprovedTasks() {
   if (!userToken) throw new Error("Mailbox owner authorization is required before sending approved mail.");
 
   let sent = 0;
+  let failed = 0;
   let safeModeSkipped = 0;
   for (const task of candidates) {
     const fields = task.fields || {};
@@ -1030,6 +1364,7 @@ async function processApprovedTasks() {
     const recipientAllowed = config.testRecipients.includes(recipient.toLowerCase());
     if (config.safeTestMode && !recipientAllowed) {
       safeModeSkipped += 1;
+      await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "安全模式拦截" });
       await recordOutbound({
         status: "blocked_by_safe_test_mode",
         recipient,
@@ -1052,6 +1387,7 @@ async function processApprovedTasks() {
         dedupeKey: `approval-${task.record_id}-${messageId}`
       });
     } catch (error) {
+      failed += 1;
       await recordOutbound({
         status: "api_failed",
         recipient,
@@ -1060,7 +1396,16 @@ async function processApprovedTasks() {
         apiAccepted: false,
         error: error.message
       });
-      throw error;
+      await feishu.updateBitableRecord("approvalTasks", task.record_id, { "任务状态": "发送失败" });
+      await feishu.createBitableRecord("actionLogs", {
+        "事件类型": "approved_mail_send_failed",
+        "事件来源": "approval_task",
+        "操作内容": subject,
+        "操作结果": "failed",
+        "错误信息": error.message,
+        "关联邮件ID": messageId
+      });
+      continue;
     }
     await recordOutbound({
       status: "api_accepted",
@@ -1085,17 +1430,31 @@ async function processApprovedTasks() {
     });
     sent += 1;
   }
-  return { checked: candidates.length, sent, safeModeSkipped };
+  return { checked: candidates.length, sent, failed, safeModeSkipped };
 }
 
 async function runMailboxWork(reason) {
-  const poll = await pollMailbox();
-  await reconcileManualReviewLogs();
-  const approvals = await processApprovedTasks();
-  await auditApprovalQueue();
-  await auditMailboxInbox();
-  console.log(`Mailbox work (${reason}):`, poll.status, approvals.sent);
-  return { poll, approvals };
+  const lockName = "mailbox-work-lock";
+  const lockToken = randomUUID();
+  const locked = redis.isConfigured() ? await redis.acquireLock(lockName, lockToken, 900) : true;
+  if (!locked) {
+    return {
+      poll: { status: "already_running", processed: 0 },
+      approvals: { checked: 0, sent: 0, safeModeSkipped: 0 }
+    };
+  }
+  try {
+    const poll = await pollMailbox();
+    await reconcileManualReviewLogs();
+    const approvals = await processApprovedTasks();
+    await auditApprovalQueue();
+    await auditMailboxInbox();
+    await auditDataIntegrity();
+    console.log(`Mailbox work (${reason}):`, poll.status, approvals.sent);
+    return { poll, approvals };
+  } finally {
+    if (redis.isConfigured()) await redis.releaseLock(lockName, lockToken).catch(() => {});
+  }
 }
 
 function scheduleMailboxPoll(reason) {
@@ -1117,24 +1476,14 @@ async function processMailboxEvent(body) {
     return;
   }
   const dedupeKey = `mail-event:${eventId || messageId}`;
-  if (await redis.exists(dedupeKey)) return;
-  await redis.set(dedupeKey, "1", { ex: 60 * 60 * 24 * 30 });
+  if (await redis.exists(dedupeKey) || await redis.exists(`polled-mail:${messageId}`)) return;
 
   const userToken = await getUserToken();
   if (!userToken) {
     throw new Error("Mailbox owner authorization is required before processing mail events.");
   }
-  const message = await feishu.getMailboxMessage({
-    userMailboxId: mailboxId,
-    messageId,
-    accessToken: userToken.accessToken
-  });
-  await processCreatorEmail({
-      email: mapMailboxMessage(message, messageId),
-      feishu,
-      openai,
-      ruleStore
-  });
+  await processMailboxMessageOnce({ messageId, mailboxId, userToken });
+  await redis.set(dedupeKey, "1", { ex: 60 * 60 * 24 * 30 });
 }
 
 async function recordMailboxEvent(update) {
@@ -1164,7 +1513,7 @@ async function handleFeishuWebhook(req, res) {
     error: ""
   });
   const token = body.token || body.header?.token;
-  if (config.feishu.verificationToken && token && token !== config.feishu.verificationToken) {
+  if (config.feishu.verificationToken && token !== config.feishu.verificationToken) {
     await recordMailboxEvent({ status: "rejected_invalid_verification_token", error: "verification token mismatch" });
     return sendJson(res, 401, { ok: false, error: "invalid_feishu_token" });
   }
@@ -1418,6 +1767,9 @@ async function route(req, res) {
       historicalReplayAcceptance,
       senderAddressReconciliation,
       missingDraftReconciliation,
+      dataIntegrityAudit,
+      operationalSchemaAudit,
+      historicalContextReconciliation,
       missingConfig: getMissingConfig(config)
     });
   }
@@ -1494,18 +1846,21 @@ const server = createServer((req, res) => {
 
 server.listen(config.port, () => {
   console.log(`creator-mail-ai-workflow listening on ${config.port}`);
-  setTimeout(() => scheduleMailboxPoll("startup"), 3_000);
   setTimeout(() => {
     ensureClientIntakeTable()
+      .then(() => ensureOperationalTableFields())
+      .then(() => runMailboxWork("startup"))
       .then(() => runClientLiveAcceptance())
       .then(() => auditApprovalQueue())
+      .then(() => reconcileHistoricalContext(40))
       .then(() => reconcileMissingSenderAddresses(40))
       .then(() => reconcileMissingDrafts(40))
+      .then(() => reconcileManualReviewLogs())
+      .then(() => auditDataIntegrity())
       .then(() => runHistoricalReplayAcceptance(40))
-      .catch(async (error) => {
-        await recordClientIntakeSetup({ status: "failed", error: error.message });
-        console.error("Client intake setup failed:", error.message);
+      .catch((error) => {
+        console.error("Startup validation failed:", error.message);
       });
-  }, 5_000);
+  }, 3_000);
   setInterval(() => scheduleMailboxPoll("interval"), 60_000).unref();
 });

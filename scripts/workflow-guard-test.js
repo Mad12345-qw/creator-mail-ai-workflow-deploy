@@ -93,4 +93,53 @@ if (paidOnlyResult.action !== "manual_review") {
   throw new Error(`Expected paid-only manual_review, got ${paidOnlyResult.action}`);
 }
 
-console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action }));
+const mixedRuleResult = await processCreatorEmail({
+  email: { messageId: "guard-test-5", from: "creator@example.com", subject: "Thanks", text: "Thanks, my rate is USD 150." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "general_creator_reply", riskLevel: "Low", action: "no_reply", summary: "Mixed message.", draftReply: "Thank you." };
+    }
+  },
+  ruleStore: {
+    async load() {
+      return {
+        "no-reply-rules.json": { rules: [{ id: "simple-ack", match: ["thanks"], action: "no_reply" }] },
+        "manual-review-rules.json": { rules: [{ id: "paid-collaboration", match: ["my rate"], action: "manual_review" }] }
+      };
+    }
+  }
+});
+
+if (mixedRuleResult.action !== "manual_review") {
+  throw new Error(`Expected mixed thanks/rate manual_review, got ${mixedRuleResult.action}`);
+}
+
+const multiProjectFeishu = {
+  ...feishu,
+  async listAllBitableRecords(tableName) {
+    if (tableName !== "projectProducts") return { items: [] };
+    return {
+      items: [
+        { record_id: "project-a", fields: { "项目状态": "Active", "品牌名称": "Brand A", "产品名称": "Product A" } },
+        { record_id: "project-b", fields: { "项目状态": "Active", "品牌名称": "Brand B", "产品名称": "Product B" } }
+      ]
+    };
+  }
+};
+const unmatchedProjectResult = await processCreatorEmail({
+  email: { messageId: "guard-test-6", from: "creator@example.com", subject: "Hello", text: "I am interested in working together." },
+  feishu: multiProjectFeishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "general_creator_reply", riskLevel: "Low", action: "draft_reply", summary: "General interest.", draftReply: "Thank you." };
+    }
+  },
+  ruleStore
+});
+
+if (unmatchedProjectResult.action !== "manual_review" || unmatchedProjectResult.projectMatches.length !== 0) {
+  throw new Error("Expected unmatched multi-project email to require manual review without guessing a project.");
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action }));

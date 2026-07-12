@@ -184,14 +184,34 @@ export class FeishuClient {
     );
   }
 
-  async listBitableRecords(tableName, pageSize = 100) {
+  async listBitableRecords(tableName, pageSize = 100, pageToken = "") {
     const appToken = this.config.bitable.appToken;
     const tableId = await this.resolveBitableTableId(tableName);
     if (!appToken || !tableId) return { skipped: true, items: [] };
+    const query = new URLSearchParams({ page_size: String(pageSize) });
+    if (pageToken) query.set("page_token", pageToken);
     const data = await this.request(
-      `/bitable/v1/apps/${appToken}/tables/${tableId}/records?page_size=${pageSize}`
+      `/bitable/v1/apps/${appToken}/tables/${tableId}/records?${query.toString()}`
     );
     return data.data || data;
+  }
+
+  async listAllBitableRecords(tableName, { pageSize = 100, maxRecords = 1000 } = {}) {
+    const items = [];
+    let pageToken = "";
+    while (items.length < maxRecords) {
+      const data = await this.listBitableRecords(
+        tableName,
+        Math.min(pageSize, maxRecords - items.length),
+        pageToken
+      );
+      const pageItems = data.items || [];
+      items.push(...pageItems);
+      const nextPageToken = String(data.page_token || data.pageToken || "");
+      if (!data.has_more || !nextPageToken || !pageItems.length) break;
+      pageToken = nextPageToken;
+    }
+    return { items, total: items.length, hasMore: items.length >= maxRecords };
   }
 
   async resolveBitableTableId(tableName) {
@@ -275,8 +295,10 @@ export class FeishuClient {
 
   async updateBitableRecord(tableName, recordId, fields) {
     const appToken = this.config.bitable.appToken;
-    const tableId = this.config.bitable.tables[tableName];
-    if (!appToken || !tableId || !recordId) return { skipped: true };
+    const tableId = await this.resolveBitableTableId(tableName);
+    if (!appToken || !tableId || !recordId) {
+      throw new Error(`Missing bitable configuration or record id for ${tableName}.`);
+    }
     return this.request(`/bitable/v1/apps/${appToken}/tables/${tableId}/records/${recordId}`, {
       method: "PUT",
       body: JSON.stringify({ fields })
@@ -286,7 +308,7 @@ export class FeishuClient {
   async findCreatorByEmail(email) {
     const normalized = String(email || "").trim().toLowerCase();
     if (!normalized) return null;
-    const data = await this.listBitableRecords("creators", 100);
+    const data = await this.listAllBitableRecords("creators", { maxRecords: 1000 });
     for (const record of data.items || []) {
       const fields = record.fields || {};
       const values = [fields["联系方式"], fields["邮箱"], fields["Email"], fields["邮箱地址"]]
@@ -304,12 +326,9 @@ export class FeishuClient {
 
   async createBitableRecord(tableName, fields) {
     const appToken = this.config.bitable.appToken;
-    const tableId = this.config.bitable.tables[tableName];
+    const tableId = await this.resolveBitableTableId(tableName);
     if (!appToken || !tableId) {
-      return {
-        skipped: true,
-        reason: `Missing bitable config for ${tableName}`
-      };
+      throw new Error(`Missing bitable configuration for ${tableName}.`);
     }
 
     return this.request(`/bitable/v1/apps/${appToken}/tables/${tableId}/records`, {

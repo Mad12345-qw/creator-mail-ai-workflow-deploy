@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "check": "node src/server.js --check",
-    "test:workflow-guard": "node scripts/workflow-guard-test.js"
+    "test:workflow-guard": "node scripts/workflow-guard-test.js",
+    "test:pagination": "node scripts/client-pagination-test.js"
   },
   "engines": {
     "node": ">=20"

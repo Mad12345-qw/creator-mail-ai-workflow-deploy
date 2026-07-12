@@ -62,4 +62,14 @@ export class RedisStore {
   async del(name) {
     return this.command("DEL", this.key(name));
   }
+
+  async acquireLock(name, token, ttlSeconds = 120) {
+    const result = await this.command("SET", this.key(name), token, "NX", "EX", String(ttlSeconds));
+    return result === "OK";
+  }
+
+  async releaseLock(name, token) {
+    const script = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
+    return this.command("EVAL", script, "1", this.key(name), token);
+  }
 }

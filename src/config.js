@@ -1,4 +1,5 @@
 const REQUIRED_FOR_BOOT = ["CRON_SECRET"];
+const REQUIRED_OPERATIONAL_TABLES = ["creators", "emailLog", "approvalTasks", "actionLogs"];
 
 const TABLE_ENV_KEYS = {
   projectProducts: "PROJECT_PRODUCT_TABLE_ID",
@@ -89,6 +90,11 @@ export function getMissingConfig(config = getConfig()) {
     missing.push("OPENAI_API_KEY");
   }
   if (!config.bitable.appToken) missing.push("BITABLE_APP_TOKEN");
+  for (const tableName of REQUIRED_OPERATIONAL_TABLES) {
+    if (!config.bitable.tables[tableName]) missing.push(TABLE_ENV_KEYS[tableName]);
+  }
+  if (!config.redis.url) missing.push("UPSTASH_REDIS_REST_URL");
+  if (!config.redis.token) missing.push("UPSTASH_REDIS_REST_TOKEN");
   return missing;
 }
 

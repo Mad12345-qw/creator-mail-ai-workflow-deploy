@@ -42,13 +42,22 @@ function decideAction(intent) {
 
 function findMatchingRule(email, rules) {
   const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
-  const files = ["no-reply-rules.json", "manual-review-rules.json"];
-  for (const file of files) {
-    for (const rule of rules?.[file]?.rules || []) {
-      if ((rule.match || []).some((phrase) => text.includes(String(phrase).toLowerCase()))) {
-        return rule;
-      }
-    }
+  const matches = (file) => (rules?.[file]?.rules || []).filter((rule) =>
+    (rule.match || []).some((phrase) => text.includes(String(phrase).toLowerCase()))
+  );
+  const noReplyMatches = matches("no-reply-rules.json");
+  const hardNoReply = noReplyMatches.find((rule) =>
+    ["system-delivery-notice", "auto-reply", "stop-contact"].includes(rule.id)
+  );
+  if (hardNoReply) return hardNoReply;
+
+  const manualMatch = matches("manual-review-rules.json")[0];
+  if (manualMatch) return manualMatch;
+
+  const simpleAck = noReplyMatches.find((rule) => rule.id === "simple-ack");
+  const hasBusinessSignal = /\?|\brate\b|quote|price|fee|budget|paid|commission|agreement|contract|payment|sample|shipping/.test(text);
+  if (simpleAck && !hasBusinessSignal && text.length <= 160) {
+    return simpleAck;
   }
   return null;
 }
@@ -90,7 +99,9 @@ function projectSummary(record) {
 }
 
 async function findRelevantProjects(email, feishu) {
-  const data = await feishu.listBitableRecords("projectProducts", 100);
+  const data = feishu.listAllBitableRecords
+    ? await feishu.listAllBitableRecords("projectProducts", { maxRecords: 1000 })
+    : await feishu.listBitableRecords("projectProducts", 100);
   const active = (data.items || [])
     .map(projectSummary)
     .filter((project) => {
@@ -104,7 +115,8 @@ async function findRelevantProjects(email, feishu) {
       .filter((value) => value.length >= 2)
       .some((value) => emailText.includes(value))
   );
-  return (matched.length ? matched : active).slice(0, 3);
+  if (matched.length) return matched.slice(0, 3);
+  return active.length === 1 ? active : [];
 }
 
 export async function processCreatorEmail({ email, feishu, openai, ruleStore }) {
@@ -127,9 +139,12 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
   let analysis = await openai.analyzeEmail(email, context);
   const intent = analysis.intent && analysis.intent !== "unconfigured" ? analysis.intent : fallbackIntent;
   const permittedActions = new Set(["no_reply", "record_only", "draft_reply", "manual_review"]);
-  const requiredAction = requiresManualReviewIntent(intent) || requiresManualReviewIntent(fallbackIntent)
+  let requiredAction = requiresManualReviewIntent(intent) || requiresManualReviewIntent(fallbackIntent)
     ? "manual_review"
     : decideAction(intent);
+  if (!projects.length && !["no_reply", "record_only"].includes(requiredAction)) {
+    requiredAction = "manual_review";
+  }
   const action = matchedRule?.action || (
     ["manual_review", "no_reply", "record_only"].includes(requiredAction)
       ? requiredAction
@@ -151,16 +166,33 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     };
   }
 
+  const matchedProjectText = projects
+    .map((project) => [project.brand, project.product, project.campaign].filter(Boolean).join(" / "))
+    .filter(Boolean)
+    .join("; ");
+  const dataQualityIssues = [
+    !email.messageId ? "missing_message_id" : "",
+    !email.from ? "missing_sender" : "",
+    !email.subject && !email.text ? "missing_content" : "",
+    !projects.length && !["no_reply", "record_only"].includes(action) ? "unmatched_project" : ""
+  ].filter(Boolean);
+
   const logFields = {
     "邮件ID": email.messageId || "",
     "发件人邮箱": email.from || "",
+    "收件人邮箱": email.to || "",
     "邮件主题": email.subject || "",
+    "邮件正文": String(email.text || "").slice(0, 20000),
+    "接收时间": email.receivedAt || "",
     "AI识别类型": intent,
-    "风险等级": analysis.riskLevel || (action === "manual_review" ? "High" : "Medium"),
+    "风险等级": action === "manual_review" ? "High" : (analysis.riskLevel || "Medium"),
     "处理动作": action,
     "AI摘要": analysis.summary || "",
     "AI草稿": analysis.draftReply || "",
     "关联达人": creator?.name || "",
+    "匹配项目": matchedProjectText,
+    "命中规则": matchedRule?.id || "",
+    "数据完整性": dataQualityIssues.length ? dataQualityIssues.join(",") : "complete",
     "处理状态": action === "manual_review" ? "待人工确认" : "已记录"
   };
 
@@ -178,7 +210,11 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
       "任务状态": "待处理",
       "负责人": "",
       "人工备注": "",
-      "关联邮件ID": email.messageId || ""
+      "关联邮件ID": email.messageId || "",
+      "发件人邮箱": email.from || "",
+      "原邮件主题": email.subject || "",
+      "原邮件正文": String(email.text || "").slice(0, 20000),
+      "匹配项目": matchedProjectText
     });
   }
 
