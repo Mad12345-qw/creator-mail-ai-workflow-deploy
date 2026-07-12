@@ -546,6 +546,7 @@ async function processApprovedTasks() {
 async function runMailboxWork(reason) {
   const poll = await pollMailbox();
   const approvals = await processApprovedTasks();
+  await auditApprovalQueue();
   console.log(`Mailbox work (${reason}):`, poll.status, approvals.sent);
   return { poll, approvals };
 }
@@ -855,6 +856,13 @@ async function route(req, res) {
       mailboxOAuthRedirectConfigured: Boolean(getOAuthRedirectUri()),
       outboundTracking: "enabled",
       publicSampleProcessing: false,
+      mailboxPoll: {
+        status: lastMailboxPoll.status || "not_started",
+        processed: Number(lastMailboxPoll.processed || 0),
+        seen: Number(lastMailboxPoll.seen || 0),
+        updatedAt: lastMailboxPoll.updatedAt || "",
+        error: lastMailboxPoll.error || ""
+      },
       clientIntakeSetup,
       clientLiveAcceptance,
       approvalQueueAudit,
