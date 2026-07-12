@@ -75,6 +75,7 @@ export class OpenAIClient {
       },
       body: JSON.stringify({
         model: this.config.deepseek.model,
+        temperature: 0,
         messages: [
           {
             role: "system",
