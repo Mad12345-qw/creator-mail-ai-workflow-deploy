@@ -62,6 +62,36 @@ function findMatchingRule(email, rules) {
   return null;
 }
 
+function findPromotionRule(email, intent, action, rules) {
+  if (!["draft_reply", "manual_review"].includes(action)) return null;
+  const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
+  return (rules?.["promotion-rules.json"]?.rules || []).find((rule) => {
+    if (!rule.enabled || !rule.applicationLink || !rule.draftParagraph) return false;
+    const aliases = (rule.brandAliases || []).map((value) => String(value).toLowerCase()).filter(Boolean);
+    if (aliases.some((alias) => text.includes(alias)) || text.includes(String(rule.applicationLink).toLowerCase())) return false;
+    const excluded = (rule.excludedIntents || []).map((value) => String(value).toLowerCase());
+    const normalizedIntent = String(intent || "").toLowerCase();
+    if (excluded.some((value) => normalizedIntent === value || normalizedIntent.includes(value))) return false;
+    return (rule.eligibleSignals || []).some((signal) => text.includes(String(signal).toLowerCase()));
+  }) || null;
+}
+
+function appendPromotionToDraft(draft, rule) {
+  const current = String(draft || "").trim();
+  if (!rule || !current) return current;
+  const lower = current.toLowerCase();
+  const aliases = (rule.brandAliases || []).map((value) => String(value).toLowerCase()).filter(Boolean);
+  if (lower.includes(String(rule.applicationLink).toLowerCase()) || aliases.some((alias) => lower.includes(alias))) {
+    return current;
+  }
+  const paragraph = String(rule.draftParagraph || "").trim();
+  const signoffPattern = /\n((?:best|best regards|kind regards|regards|sincerely)[,\s][\s\S]*)$/i;
+  if (signoffPattern.test(current)) {
+    return current.replace(signoffPattern, `\n\n${paragraph}\n\n$1`);
+  }
+  return `${current}\n\n${paragraph}`;
+}
+
 function projectSummary(record) {
   const fields = record.fields || {};
   return {
@@ -165,6 +195,13 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
         || "Thank you for your message. We have received the details and are reviewing them internally. We will follow up once the relevant terms have been confirmed."
     };
   }
+  const promotionRule = findPromotionRule(email, intent, action, rules);
+  if (promotionRule) {
+    analysis = {
+      ...analysis,
+      draftReply: appendPromotionToDraft(analysis.draftReply, promotionRule)
+    };
+  }
 
   const matchedProjectText = projects
     .map((project) => [project.brand, project.product, project.campaign].filter(Boolean).join(" / "))
@@ -197,7 +234,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     "人工备注": "",
     "关联达人": creator?.name || "",
     "匹配项目": matchedProjectText,
-    "命中规则": matchedRule?.id || "",
+    "命中规则": [matchedRule?.id, promotionRule?.id].filter(Boolean).join("; "),
     "数据完整性": dataQualityIssues.length ? dataQualityIssues.join(",") : "complete",
     "处理状态": action === "manual_review" ? "待人工确认" : "已记录"
   };
@@ -216,6 +253,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
       campaign: project.campaign
     })),
     matchedRule: matchedRule?.id || null,
+    promotionRule: promotionRule?.id || null,
     analysis,
     writeResult,
     approvalResult

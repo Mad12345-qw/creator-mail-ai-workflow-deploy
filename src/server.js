@@ -666,6 +666,18 @@ async function runClientLiveAcceptance() {
           text: `Could you share the sample application details for ${product || identity}?`
         },
         allowedActions: ["draft_reply", "manual_review"]
+      },
+      {
+        name: "other_product_cross_sell",
+        email: {
+          messageId: `client-live-acceptance-cross-sell-${Date.now()}`,
+          from: "delivery-acceptance@example.com",
+          subject: "Fitness equipment sample application",
+          text: "I am interested in applying for the fitness product sample and discussing a collaboration."
+        },
+        allowedActions: ["draft_reply", "manual_review"],
+        requireProjectMatch: false,
+        expectedPromotionRule: "temporary-jissbon-cross-sell"
       }
     ];
 
@@ -678,11 +690,21 @@ async function runClientLiveAcceptance() {
         ruleStore
       });
       const projectMatched = result.projectMatches.some((project) => project.recordId === record.record_id);
-      if (!projectMatched) throw new Error(`${scenario.name}: client project policy was not matched.`);
+      if (scenario.requireProjectMatch !== false && !projectMatched) {
+        throw new Error(`${scenario.name}: client project policy was not matched.`);
+      }
       if (!scenario.allowedActions.includes(result.action)) {
         throw new Error(`${scenario.name}: unexpected action ${result.action}.`);
       }
-      results.push({ name: scenario.name, action: result.action, projectMatched });
+      if (scenario.expectedPromotionRule && result.promotionRule !== scenario.expectedPromotionRule) {
+        throw new Error(`${scenario.name}: expected promotion rule ${scenario.expectedPromotionRule}.`);
+      }
+      results.push({
+        name: scenario.name,
+        action: result.action,
+        projectMatched,
+        promotionRule: result.promotionRule || ""
+      });
     }
 
     clientLiveAcceptance = {

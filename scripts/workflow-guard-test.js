@@ -149,4 +149,49 @@ if (unmatchedProjectResult.action !== "manual_review" || unmatchedProjectResult.
   throw new Error("Expected unmatched multi-project email to require manual review without guessing a project.");
 }
 
-console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action }));
+const promotionRule = {
+  id: "temporary-jissbon-cross-sell",
+  enabled: true,
+  productName: "Jissbon condoms",
+  brandAliases: ["Jissbon", "杰士邦"],
+  applicationLink: "https://affiliate-us.tiktok.com/api/v1/share/AJXACZJQ6WcO",
+  eligibleSignals: ["sample", "product", "interested", "collaboration", "apply"],
+  excludedIntents: ["auto_reply", "stop_contact", "bounce_or_delivery_failure", "payment_issue", "agreement", "complaint", "legal", "safety"],
+  draftParagraph: "We're also currently prioritizing our Jissbon condom campaign. Apply here: https://affiliate-us.tiktok.com/api/v1/share/AJXACZJQ6WcO"
+};
+const promotionRuleStore = {
+  async load() {
+    return { "promotion-rules.json": { rules: [promotionRule] } };
+  }
+};
+const promotedSampleResult = await processCreatorEmail({
+  email: { messageId: "guard-test-7", from: "fitness@example.com", subject: "Fitness sample", text: "I am interested in applying for the fitness product sample." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "sample_or_shipping", riskLevel: "Low", action: "draft_reply", summary: "Sample request.", draftReply: "Thanks for your interest.\n\nBest regards,\nTeam" };
+    }
+  },
+  ruleStore: promotionRuleStore
+});
+if (promotedSampleResult.promotionRule !== promotionRule.id
+  || !promotedSampleResult.analysis.draftReply.includes(promotionRule.applicationLink)
+  || promotedSampleResult.analysis.draftReply.indexOf(promotionRule.applicationLink) > promotedSampleResult.analysis.draftReply.indexOf("Best regards")) {
+  throw new Error("Expected the Jissbon recommendation before the sign-off for another product sample request.");
+}
+
+const directJissbonResult = await processCreatorEmail({
+  email: { messageId: "guard-test-8", from: "creator@example.com", subject: "Jissbon sample", text: "I am interested in applying for the Jissbon sample." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "sample_or_shipping", riskLevel: "Low", action: "draft_reply", summary: "Jissbon request.", draftReply: "Thanks for your Jissbon interest." };
+    }
+  },
+  ruleStore: promotionRuleStore
+});
+if (directJissbonResult.promotionRule || directJissbonResult.analysis.draftReply.includes(promotionRule.applicationLink)) {
+  throw new Error("Direct Jissbon inquiries must not receive a duplicate cross-sell recommendation.");
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule }));

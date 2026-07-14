@@ -6,6 +6,7 @@ These files hold rules that rarely change:
 - manual review rules
 - default status transitions
 - safety and agreement guardrails
+- temporary cross-product promotion rules
 
 Frequently changing business data stays in Feishu Bitable, especially:
 

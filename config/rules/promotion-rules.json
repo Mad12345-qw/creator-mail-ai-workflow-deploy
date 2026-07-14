@@ -1,0 +1,36 @@
+{
+  "rules": [
+    {
+      "id": "temporary-jissbon-cross-sell",
+      "enabled": true,
+      "productName": "Jissbon condoms",
+      "brandAliases": ["Jissbon", "杰士邦"],
+      "applicationLink": "https://affiliate-us.tiktok.com/api/v1/share/AJXACZJQ6WcO",
+      "eligibleSignals": [
+        "sample",
+        "product",
+        "interested",
+        "interest",
+        "collaboration",
+        "collab",
+        "affiliate",
+        "apply",
+        "application",
+        "review",
+        "promote",
+        "partnership"
+      ],
+      "excludedIntents": [
+        "auto_reply",
+        "stop_contact",
+        "bounce_or_delivery_failure",
+        "payment_issue",
+        "agreement",
+        "complaint",
+        "legal",
+        "safety"
+      ],
+      "draftParagraph": "We're also currently prioritizing our Jissbon condom campaign and would love to invite you to consider this product as well. If you're interested, you can apply for a sample here: https://affiliate-us.tiktok.com/api/v1/share/AJXACZJQ6WcO"
+    }
+  ]
+}

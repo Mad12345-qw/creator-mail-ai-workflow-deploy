@@ -12,7 +12,8 @@ export class RuleStore {
     const files = [
       "no-reply-rules.json",
       "manual-review-rules.json",
-      "status-rules.json"
+      "status-rules.json",
+      "promotion-rules.json"
     ];
     const entries = await Promise.all(
       files.map(async (file) => {
