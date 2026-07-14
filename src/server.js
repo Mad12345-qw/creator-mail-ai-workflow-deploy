@@ -6,7 +6,14 @@ import { OpenAIClient } from "./openaiClient.js";
 import { RedisStore } from "./redisStore.js";
 import { RuleStore } from "./ruleStore.js";
 import { getPathAndQuery, readJson, sendJson, sendRedirect, sendText } from "./http.js";
-import { processCreatorEmail, requiresManualReviewIntent, requiresNoReplyIntent } from "./workflow.js";
+import {
+  appendPromotionToDraft,
+  findPromotionRule,
+  processCreatorEmail,
+  requiresManualReviewIntent,
+  requiresNoReplyIntent,
+  validateDraftQuality
+} from "./workflow.js";
 
 const config = getConfig();
 const feishu = new FeishuClient(config);
@@ -28,6 +35,7 @@ let dataIntegrityAudit = { status: "not_started" };
 let operationalSchemaAudit = { status: "not_started" };
 let historicalContextReconciliation = { status: "not_started" };
 let draftIdentityReconciliation = { status: "not_started" };
+let draftQualityAudit = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -44,6 +52,8 @@ const OPERATIONAL_TABLE_FIELDS = {
     { field_name: "是否允许发送", type: 7 },
     { field_name: "审批状态", type: 1 },
     { field_name: "身份校验", type: 1 },
+    { field_name: "草稿质检", type: 1 },
+    { field_name: "草稿质检问题", type: 1 },
     { field_name: "负责人", type: 1 },
     { field_name: "人工备注", type: 1 },
     { field_name: "匹配项目", type: 1 },
@@ -701,12 +711,16 @@ async function runClientLiveAcceptance() {
       if (scenario.expectedPromotionRule && result.promotionRule !== scenario.expectedPromotionRule) {
         throw new Error(`${scenario.name}: expected promotion rule ${scenario.expectedPromotionRule}.`);
       }
+      if (result.draftQuality?.issues?.length) {
+        throw new Error(`${scenario.name}: draft quality violations ${result.draftQuality.issues.join(",")}.`);
+      }
       results.push({
         name: scenario.name,
         action: result.action,
         projectMatched,
         promotionRule: result.promotionRule || "",
-        identityStatus: result.identityStatus || ""
+        identityStatus: result.identityStatus || "",
+        draftQualityStatus: result.draftQuality?.status || ""
       });
     }
 
@@ -1217,6 +1231,117 @@ async function reconcileRecentDraftIdentity() {
   return draftIdentityReconciliation;
 }
 
+function qualityIssueCounts(items) {
+  const counts = {};
+  for (const item of items) {
+    for (const issue of item.issues || []) counts[issue] = (counts[issue] || 0) + 1;
+  }
+  return counts;
+}
+
+async function auditAndRepairStoredDraftQuality() {
+  draftQualityAudit = { status: "running", scanned: 0, repaired: 0, updatedAt: new Date().toISOString() };
+  try {
+    const rules = ruleStore ? await ruleStore.load() : {};
+    const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
+    const records = logsData.items || [];
+    const assessments = records.map((record) => {
+      const fields = record.fields || {};
+      const email = {
+        messageId: String(fields["邮件ID"] || ""),
+        from: String(fields["发件人邮箱"] || ""),
+        to: String(fields["收件人邮箱"] || ""),
+        subject: String(fields["邮件主题"] || ""),
+        text: String(fields["邮件正文"] || ""),
+        receivedAt: String(fields["接收时间"] || "")
+      };
+      const action = String(fields["处理动作"] || "");
+      const intent = String(fields["AI识别类型"] || "");
+      const promotionRule = findPromotionRule(email, intent, action, rules);
+      const issues = validateDraftQuality({
+        email,
+        draft: String(fields["AI草稿"] || ""),
+        action,
+        promotionRule
+      });
+      return { record, fields, email, action, intent, promotionRule, issues };
+    });
+    const initialIssues = assessments.filter((item) => item.issues.length);
+    const cleanAssessments = assessments.filter((item) => !item.issues.length);
+    for (const item of cleanAssessments) {
+      if (String(item.fields["草稿质检"] || "") === "passed" && !String(item.fields["草稿质检问题"] || "")) continue;
+      await feishu.updateBitableRecord("emailLog", item.record.record_id, {
+        "草稿质检": "passed",
+        "草稿质检问题": ""
+      });
+    }
+    const dryRunFeishu = dryRunFeishuClient();
+    let repaired = 0;
+    let deterministicRepairs = 0;
+    let regeneratedRepairs = 0;
+    for (const item of initialIssues) {
+      let draft = String(item.fields["AI草稿"] || "");
+      const promotionOnly = item.issues.every((issue) => [
+        "promotion_link_missing_or_duplicated",
+        "promotion_product_missing"
+      ].includes(issue));
+      if (!["draft_reply", "manual_review"].includes(item.action)) {
+        draft = "";
+        deterministicRepairs += 1;
+      } else if (promotionOnly && item.promotionRule) {
+        draft = appendPromotionToDraft(draft, item.promotionRule);
+        deterministicRepairs += 1;
+      } else {
+        const result = await processCreatorEmail({
+          email: item.email,
+          feishu: dryRunFeishu,
+          openai,
+          ruleStore
+        });
+        draft = String(result.analysis?.draftReply || "");
+        regeneratedRepairs += 1;
+      }
+      const remainingIssues = validateDraftQuality({
+        email: item.email,
+        draft,
+        action: item.action,
+        promotionRule: item.promotionRule
+      });
+      await feishu.updateBitableRecord("emailLog", item.record.record_id, {
+        "AI草稿": draft,
+        "草稿质检": remainingIssues.length ? "failed" : "repaired",
+        "草稿质检问题": remainingIssues.join(",")
+      });
+      if (!remainingIssues.length) repaired += 1;
+    }
+    const remaining = initialIssues.length - repaired;
+    draftQualityAudit = {
+      status: remaining === 0 ? "passed" : "failed",
+      scanned: records.length,
+      clean: cleanAssessments.length,
+      recordsWithIssues: initialIssues.length,
+      initialIssueCounts: qualityIssueCounts(initialIssues),
+      repaired,
+      deterministicRepairs,
+      regeneratedRepairs,
+      remaining,
+      updatedAt: new Date().toISOString(),
+      error: remaining ? "Some stored drafts still have quality violations." : ""
+    };
+  } catch (error) {
+    draftQualityAudit = {
+      status: "failed",
+      scanned: 0,
+      recordsWithIssues: 0,
+      repaired: 0,
+      remaining: -1,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return draftQualityAudit;
+}
+
 async function reconcileManualReviewLogs() {
   manualReviewReconciliation = { status: "running", updatedAt: new Date().toISOString() };
   try {
@@ -1323,6 +1448,16 @@ async function auditDataIntegrity() {
     const receivedTimeCount = productionLogs.filter((record) => String(record.fields?.["接收时间"] || "").trim()).length;
     const sentProductionLogs = productionLogs.filter((record) => String(record.fields?.["处理状态"] || "") === "已发送");
     const replySentTimeCount = sentProductionLogs.filter((record) => String(record.fields?.["回复发送时间"] || "").trim()).length;
+    const actionableProductionLogs = productionLogs.filter((record) =>
+      ["draft_reply", "manual_review"].includes(String(record.fields?.["处理动作"] || ""))
+    );
+    const qualityCheckedCount = actionableProductionLogs.filter((record) =>
+      String(record.fields?.["草稿质检"] || "").trim()
+    ).length;
+    const draftQualityIssues = actionableProductionLogs.filter((record) =>
+      String(record.fields?.["草稿质检问题"] || "").trim()
+        || ["failed", "blocked_before_send", "fallback_with_remaining_issues"].includes(String(record.fields?.["草稿质检"] || ""))
+    ).length;
     const issues = {
       duplicateEmailLogs,
       duplicateApprovalTasks,
@@ -1332,7 +1467,8 @@ async function auditDataIntegrity() {
       missingDrafts,
       manualLogsMissingApproval,
       orphanApprovalTasks,
-      missingApprovalContext
+      missingApprovalContext,
+      draftQualityIssues
     };
     const issueCount = Object.values(issues).reduce((sum, value) => sum + Number(value || 0), 0);
     dataIntegrityAudit = {
@@ -1348,6 +1484,10 @@ async function auditDataIntegrity() {
         receivedExpected: productionLogs.length,
         replySent: replySentTimeCount,
         replySentExpected: sentProductionLogs.length
+      },
+      draftQualityCoverage: {
+        checked: qualityCheckedCount,
+        expected: actionableProductionLogs.length
       },
       issues,
       issueCount,
@@ -1561,10 +1701,12 @@ async function processApprovedTasks() {
   if (!candidates.length) return { checked: 0, sent: 0, failed: 0, safeModeSkipped: 0 };
   const userToken = await getUserToken();
   if (!userToken) throw new Error("Mailbox owner authorization is required before sending approved mail.");
+  const rules = ruleStore ? await ruleStore.load() : {};
 
   let sent = 0;
   let failed = 0;
   let safeModeSkipped = 0;
+  let qualityBlocked = 0;
   for (const emailLog of candidates) {
     const fields = emailLog.fields || {};
     const messageId = String(fields["邮件ID"] || "");
@@ -1572,6 +1714,35 @@ async function processApprovedTasks() {
     const draft = String(fields["人工修改稿"] || fields["AI草稿"] || "").trim();
     if (!recipient || !draft) {
       await feishu.updateBitableRecord("emailLog", emailLog.record_id, { "审批状态": "发送资料不完整" });
+      continue;
+    }
+    const email = {
+      messageId,
+      from: recipient,
+      to: String(fields["收件人邮箱"] || ""),
+      subject: String(fields["邮件主题"] || ""),
+      text: String(fields["邮件正文"] || ""),
+      receivedAt: String(fields["接收时间"] || "")
+    };
+    const promotionRule = findPromotionRule(
+      email,
+      String(fields["AI识别类型"] || ""),
+      String(fields["处理动作"] || "manual_review"),
+      rules
+    );
+    const qualityIssues = validateDraftQuality({
+      email,
+      draft,
+      action: "manual_review",
+      promotionRule
+    });
+    if (qualityIssues.length) {
+      qualityBlocked += 1;
+      await feishu.updateBitableRecord("emailLog", emailLog.record_id, {
+        "审批状态": "草稿质检拦截",
+        "草稿质检": "blocked_before_send",
+        "草稿质检问题": qualityIssues.join(",")
+      });
       continue;
     }
     const recipientAllowed = config.testRecipients.includes(recipient.toLowerCase());
@@ -1645,7 +1816,7 @@ async function processApprovedTasks() {
     });
     sent += 1;
   }
-  return { checked: candidates.length, sent, failed, safeModeSkipped };
+  return { checked: candidates.length, sent, failed, safeModeSkipped, qualityBlocked };
 }
 
 async function runMailboxWork(reason) {
@@ -1986,6 +2157,7 @@ async function route(req, res) {
       operationalSchemaAudit,
       historicalContextReconciliation,
       draftIdentityReconciliation,
+      draftQualityAudit,
       missingConfig: getMissingConfig(config)
     });
   }
@@ -2068,6 +2240,7 @@ server.listen(config.port, () => {
       .then(() => runMailboxWork("startup"))
       .then(() => runClientLiveAcceptance())
       .then(() => reconcileRecentDraftIdentity())
+      .then(() => auditAndRepairStoredDraftQuality())
       .then(() => auditApprovalQueue())
       .then(() => reconcileHistoricalContext(40))
       .then(() => reconcileMissingSenderAddresses(40))

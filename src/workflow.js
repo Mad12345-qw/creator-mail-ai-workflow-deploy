@@ -71,7 +71,7 @@ function findMatchingRule(email, rules) {
   return null;
 }
 
-function findPromotionRule(email, intent, action, rules) {
+export function findPromotionRule(email, intent, action, rules) {
   if (!["draft_reply", "manual_review"].includes(action)) return null;
   const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
   return (rules?.["promotion-rules.json"]?.rules || []).find((rule) => {
@@ -85,20 +85,69 @@ function findPromotionRule(email, intent, action, rules) {
   }) || null;
 }
 
-function appendPromotionToDraft(draft, rule) {
+export function appendPromotionToDraft(draft, rule) {
   const current = String(draft || "").trim();
   if (!rule || !current) return current;
   const lower = current.toLowerCase();
   const aliases = (rule.brandAliases || []).map((value) => String(value).toLowerCase()).filter(Boolean);
-  if (lower.includes(String(rule.applicationLink).toLowerCase()) || aliases.some((alias) => lower.includes(alias))) {
-    return current;
-  }
-  const paragraph = String(rule.draftParagraph || "").trim();
+  const hasLink = lower.includes(String(rule.applicationLink).toLowerCase());
+  const hasProduct = aliases.some((alias) => lower.includes(alias));
+  if (hasLink && hasProduct) return current;
+  const paragraph = hasProduct && !hasLink
+    ? `If you're interested, you can apply for a sample here: ${rule.applicationLink}`
+    : (!hasProduct && hasLink
+      ? `We're also currently prioritizing our ${rule.productName || "Jissbon condom"} campaign and would love to invite you to consider this product as well.`
+      : String(rule.draftParagraph || "").trim());
   const signoffPattern = /\n((?:best|best regards|kind regards|regards|sincerely)[,\s][\s\S]*)$/i;
   if (signoffPattern.test(current)) {
     return current.replace(signoffPattern, `\n\n${paragraph}\n\n$1`);
   }
   return `${current}\n\n${paragraph}`;
+}
+
+function countOccurrences(text, needle) {
+  if (!needle) return 0;
+  return String(text || "").toLowerCase().split(String(needle).toLowerCase()).length - 1;
+}
+
+export function validateDraftQuality({ email, draft, action, promotionRule }) {
+  const text = String(draft || "").trim();
+  const lower = text.toLowerCase();
+  const violations = [];
+  const actionable = ["draft_reply", "manual_review"].includes(action);
+  if (!actionable && text) violations.push("unexpected_draft_for_non_reply_action");
+  if (actionable && !text) violations.push("missing_actionable_draft");
+  if (!text) return violations;
+  if (hasCreatorRoleConfusion(text)) violations.push("creator_brand_role_confusion");
+  if (/\b(?:as an ai|ai assistant|language model|system prompt|manual review|required context|provided context|internal policy)\b/i.test(text)) {
+    violations.push("internal_or_ai_language");
+  }
+  if (/\[(?:your|brand|company|name|link|date)[^\]]*\]|<(?:your|brand|company|name|link|date)[^>]*>|\b(?:insert|add) (?:the )?(?:link|name|date) here\b/i.test(text)) {
+    violations.push("unresolved_placeholder");
+  }
+  if (/\bwe (?:accept|approve|agree to) (?:your |the )?(?:rate|fee|price|quote|offer)\b|\byour (?:rate|fee|quote|offer) (?:is|has been) approved\b|\bwe will pay\b|\bpayment (?:is|will be) guaranteed\b|\b(?:agreement|contract) (?:is|has been) (?:finalized|approved|signed)\b/i.test(text)) {
+    violations.push("unsupported_commercial_commitment");
+  }
+  if (/\bcould you (?:share|send) (?:the|your) (?:sample|product) application link\b|\bi would like to apply for (?:the|your) (?:sample|product)\b/i.test(text)) {
+    violations.push("reply_direction_reversed");
+  }
+  const signoffCount = (text.match(/(?:^|\n)(?:best|best regards|kind regards|regards|sincerely)[,\s]/gi) || []).length;
+  if (signoffCount > 1) violations.push("duplicate_signoff");
+  if (promotionRule) {
+    const link = String(promotionRule.applicationLink || "");
+    const aliases = (promotionRule.brandAliases || []).map((value) => String(value).toLowerCase()).filter(Boolean);
+    if (!link || countOccurrences(text, link) !== 1) violations.push("promotion_link_missing_or_duplicated");
+    if (aliases.length && !aliases.some((alias) => lower.includes(alias))) violations.push("promotion_product_missing");
+  }
+  if (String(email?.subject || "").trim() && /^re:\s*$/i.test(String(email.subject))) {
+    violations.push("empty_reply_subject_context");
+  }
+  return [...new Set(violations)];
+}
+
+function safeBrandFallbackDraft(promotionRule) {
+  const base = "Thank you for reaching out and for your interest in collaborating with us. We have received your message and are reviewing the details with our team. We will follow up with the relevant next steps once confirmed.";
+  return appendPromotionToDraft(base, promotionRule);
 }
 
 function projectSummary(record) {
@@ -230,6 +279,40 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
       draftReply: appendPromotionToDraft(analysis.draftReply, promotionRule)
     };
   }
+  if (!["draft_reply", "manual_review"].includes(action)) {
+    analysis = { ...analysis, draftReply: "" };
+  }
+  let draftQualityIssues = validateDraftQuality({
+    email,
+    draft: analysis.draftReply,
+    action,
+    promotionRule
+  });
+  let draftQualityStatus = draftQualityIssues.length ? "repair_required" : "passed";
+  if (draftQualityIssues.length && ["draft_reply", "manual_review"].includes(action)) {
+    const repaired = await openai.analyzeEmail(email, {
+      ...context,
+      qualityRepair: {
+        required: true,
+        violations: draftQualityIssues,
+        instruction: "Rewrite draftReply as a clean brand-to-creator email. Fix every listed violation. Do not invent or approve commercial terms."
+      },
+      requiredPromotion: promotionRule ? {
+        productName: promotionRule.productName,
+        applicationLink: promotionRule.applicationLink,
+        paragraph: promotionRule.draftParagraph
+      } : null,
+      previousAnalysis: analysis
+    });
+    const repairedDraft = appendPromotionToDraft(String(repaired.draftReply || "").trim(), promotionRule);
+    const remainingIssues = validateDraftQuality({ email, draft: repairedDraft, action, promotionRule });
+    analysis = {
+      ...analysis,
+      draftReply: remainingIssues.length ? safeBrandFallbackDraft(promotionRule) : repairedDraft
+    };
+    draftQualityIssues = validateDraftQuality({ email, draft: analysis.draftReply, action, promotionRule });
+    draftQualityStatus = draftQualityIssues.length ? "fallback_with_remaining_issues" : "corrected";
+  }
 
   const matchedProjectText = projects
     .map((project) => [project.brand, project.product, project.campaign].filter(Boolean).join(" / "))
@@ -259,6 +342,8 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     "是否允许发送": false,
     "审批状态": action === "manual_review" ? "待处理" : "无需审批",
     "身份校验": identityStatus,
+    "草稿质检": draftQualityStatus,
+    "草稿质检问题": draftQualityIssues.join(","),
     "负责人": "",
     "人工备注": "",
     "关联达人": creator?.name || "",
@@ -284,6 +369,10 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     matchedRule: matchedRule?.id || null,
     promotionRule: promotionRule?.id || null,
     identityStatus,
+    draftQuality: {
+      status: draftQualityStatus,
+      issues: draftQualityIssues
+    },
     analysis,
     writeResult,
     approvalResult

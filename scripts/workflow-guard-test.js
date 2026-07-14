@@ -1,4 +1,4 @@
-import { processCreatorEmail } from "../src/workflow.js";
+import { appendPromotionToDraft, processCreatorEmail, validateDraftQuality } from "../src/workflow.js";
 
 const writes = [];
 const feishu = {
@@ -215,4 +215,64 @@ if (identityRepairCalls !== 2
   throw new Error("Expected creator/brand role confusion to be detected and corrected.");
 }
 
-console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule, identityStatus: identityRepairResult.identityStatus }));
+const directQualityIssues = validateDraftQuality({
+  email: { subject: "Collaboration", text: "I am interested in the product sample." },
+  draft: "As an AI assistant, I am a content creator and my audience is a great fit. We approve your rate and will pay immediately. [Your Name]\n\nBest regards,\nTeam\n\nBest regards,\nTeam",
+  action: "manual_review",
+  promotionRule
+});
+for (const expectedIssue of [
+  "creator_brand_role_confusion",
+  "internal_or_ai_language",
+  "unresolved_placeholder",
+  "unsupported_commercial_commitment",
+  "duplicate_signoff",
+  "promotion_link_missing_or_duplicated",
+  "promotion_product_missing"
+]) {
+  if (!directQualityIssues.includes(expectedIssue)) {
+    throw new Error(`Expected draft quality issue: ${expectedIssue}`);
+  }
+}
+
+let qualityRepairCalls = 0;
+const qualityRepairResult = await processCreatorEmail({
+  email: { messageId: "guard-test-10", from: "creator@example.com", subject: "Rate discussion", text: "My rate is USD 200 for this collaboration." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      qualityRepairCalls += 1;
+      if (qualityRepairCalls === 1) {
+        return { intent: "quote", riskLevel: "High", action: "manual_review", summary: "Rate quote.", draftReply: "We approve your rate and will pay immediately. [Your Name]" };
+      }
+      return { intent: "quote", riskLevel: "High", action: "manual_review", summary: "Rate quote.", draftReply: "Thank you for sharing your rate. We are reviewing the proposal internally and will follow up once the terms have been confirmed." };
+    }
+  },
+  ruleStore
+});
+if (qualityRepairCalls !== 2
+  || qualityRepairResult.draftQuality.status !== "corrected"
+  || qualityRepairResult.draftQuality.issues.length !== 0) {
+  throw new Error("Expected unsupported commitments and placeholders to be repaired.");
+}
+
+const noReplyQualityIssues = validateDraftQuality({
+  email: { subject: "Delivery failure", text: "Message bounced." },
+  draft: "We should reply to this message.",
+  action: "no_reply",
+  promotionRule: null
+});
+if (!noReplyQualityIssues.includes("unexpected_draft_for_non_reply_action")) {
+  throw new Error("Expected non-reply actions to reject stored drafts.");
+}
+
+const partialPromotionDraft = appendPromotionToDraft(
+  "We would also love to discuss the Jissbon campaign.\n\nBest regards,\nTeam",
+  promotionRule
+);
+if (!partialPromotionDraft.includes(promotionRule.applicationLink)
+  || validateDraftQuality({ email: { subject: "Sample", text: "sample" }, draft: partialPromotionDraft, action: "draft_reply", promotionRule }).length) {
+  throw new Error("Expected a partial Jissbon recommendation to be completed with the exact application link.");
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule, identityStatus: identityRepairResult.identityStatus, qualityStatus: qualityRepairResult.draftQuality.status }));
