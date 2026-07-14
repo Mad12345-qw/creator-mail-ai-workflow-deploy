@@ -22,6 +22,15 @@ export function requiresNoReplyIntent(intent) {
     || /(test_message|test_email|bounce|delivery_failure|delivery_status|verification_notification|email_forwarding_verification|email_verification)/.test(normalized);
 }
 
+export function hasCreatorRoleConfusion(draft) {
+  const text = String(draft || "").toLowerCase();
+  return /\b(?:i am|i'm)\s+(?:a|an)\s+(?:content\s+)?(?:creator|influencer|affiliate)\b/.test(text)
+    || /\bmy (?:audience|followers|channel|content|platform)\b/.test(text)
+    || /\bi (?:would love|want|am interested|would like) to (?:apply|promote|feature|review|collaborate)\b/.test(text)
+    || /\bi (?:have )?(?:applied|submitted my application)\b/.test(text)
+    || /\b(?:send|ship) (?:me|us) (?:a|the) sample\b/.test(text);
+}
+
 function inferIntent(email) {
   const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
   if (/\brate card\b|\brate\b|quote|price|fee|budget|package/.test(text)) return "quote";
@@ -195,6 +204,25 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
         || "Thank you for your message. We have received the details and are reviewing them internally. We will follow up once the relevant terms have been confirmed."
     };
   }
+  let identityStatus = ["draft_reply", "manual_review"].includes(action) ? "brand_reply_verified" : "not_applicable";
+  if (["draft_reply", "manual_review"].includes(action) && hasCreatorRoleConfusion(analysis.draftReply)) {
+    const repaired = await openai.analyzeEmail(email, {
+      ...context,
+      roleCorrection: {
+        required: true,
+        instruction: "Rewrite draftReply as the brand/company partnership team replying to the creator. Never write from the creator's point of view."
+      },
+      previousAnalysis: analysis
+    });
+    const repairedDraft = String(repaired.draftReply || "").trim();
+    analysis = {
+      ...analysis,
+      draftReply: repairedDraft && !hasCreatorRoleConfusion(repairedDraft)
+        ? repairedDraft
+        : "Thank you for reaching out and for your interest in collaborating with us. We have received your message and are reviewing the details with our team. We will follow up with the relevant next steps once confirmed."
+    };
+    identityStatus = "role_confusion_corrected";
+  }
   const promotionRule = findPromotionRule(email, intent, action, rules);
   if (promotionRule) {
     analysis = {
@@ -230,6 +258,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     "人工修改稿": "",
     "是否允许发送": false,
     "审批状态": action === "manual_review" ? "待处理" : "无需审批",
+    "身份校验": identityStatus,
     "负责人": "",
     "人工备注": "",
     "关联达人": creator?.name || "",
@@ -254,6 +283,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     })),
     matchedRule: matchedRule?.id || null,
     promotionRule: promotionRule?.id || null,
+    identityStatus,
     analysis,
     writeResult,
     approvalResult

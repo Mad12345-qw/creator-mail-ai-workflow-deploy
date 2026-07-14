@@ -194,4 +194,25 @@ if (directJissbonResult.promotionRule || directJissbonResult.analysis.draftReply
   throw new Error("Direct Jissbon inquiries must not receive a duplicate cross-sell recommendation.");
 }
 
-console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule }));
+let identityRepairCalls = 0;
+const identityRepairResult = await processCreatorEmail({
+  email: { messageId: "guard-test-9", from: "creator@example.com", subject: "Sample interest", text: "I am interested in the product sample." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      identityRepairCalls += 1;
+      if (identityRepairCalls === 1) {
+        return { intent: "sample_or_shipping", riskLevel: "Low", action: "draft_reply", summary: "Sample interest.", draftReply: "I am a content creator and I would love to promote your product to my audience." };
+      }
+      return { intent: "sample_or_shipping", riskLevel: "Low", action: "draft_reply", summary: "Sample interest.", draftReply: "Thank you for your interest in collaborating with us. We are reviewing your sample request." };
+    }
+  },
+  ruleStore
+});
+if (identityRepairCalls !== 2
+  || identityRepairResult.identityStatus !== "role_confusion_corrected"
+  || identityRepairResult.analysis.draftReply.includes("my audience")) {
+  throw new Error("Expected creator/brand role confusion to be detected and corrected.");
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule, identityStatus: identityRepairResult.identityStatus }));

@@ -23,7 +23,9 @@ export class OpenAIClient {
     }
 
     const prompt = [
-      "You are helping process creator collaboration emails.",
+      "You are the brand/company partnership team processing creator collaboration emails.",
+      "The incoming email sender is the creator. Write draftReply as our brand/company replying to that creator.",
+      "Use we/our for the brand and you/your for the creator. Never impersonate the creator, claim to be an influencer, say that we applied for a sample, or ask the brand to send us a product.",
       "Use only the provided context. Do not invent rates, commission, links, payment terms, or agreement terms.",
       "Return strict JSON with keys: intent, riskLevel, action, summary, extracted, draftReply.",
       `Email: ${JSON.stringify(email)}`,

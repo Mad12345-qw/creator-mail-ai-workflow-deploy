@@ -27,6 +27,7 @@ let missingDraftReconciliation = { status: "not_started" };
 let dataIntegrityAudit = { status: "not_started" };
 let operationalSchemaAudit = { status: "not_started" };
 let historicalContextReconciliation = { status: "not_started" };
+let draftIdentityReconciliation = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -42,6 +43,7 @@ const OPERATIONAL_TABLE_FIELDS = {
     { field_name: "人工修改稿", type: 1 },
     { field_name: "是否允许发送", type: 7 },
     { field_name: "审批状态", type: 1 },
+    { field_name: "身份校验", type: 1 },
     { field_name: "负责人", type: 1 },
     { field_name: "人工备注", type: 1 },
     { field_name: "匹配项目", type: 1 },
@@ -703,7 +705,8 @@ async function runClientLiveAcceptance() {
         name: scenario.name,
         action: result.action,
         projectMatched,
-        promotionRule: result.promotionRule || ""
+        promotionRule: result.promotionRule || "",
+        identityStatus: result.identityStatus || ""
       });
     }
 
@@ -1113,7 +1116,7 @@ async function reconcileHistoricalContext(limit = 40) {
         "邮件正文": String(email.text || "").slice(0, 20000),
         "接收时间": email.receivedAt || "",
         "匹配项目": matchedProjectText,
-        "命中规则": result.matchedRule || "",
+        "命中规则": [result.matchedRule, result.promotionRule].filter(Boolean).join("; "),
         "数据完整性": email.from && (email.subject || email.text) ? "complete" : "incomplete_source"
       };
       const replySentAt = sentTimesByMessageId.get(messageId) || "";
@@ -1151,6 +1154,67 @@ async function reconcileHistoricalContext(limit = 40) {
     };
   }
   return historicalContextReconciliation;
+}
+
+async function reconcileRecentDraftIdentity() {
+  draftIdentityReconciliation = { status: "running", scanned: 0, corrected: 0, updatedAt: new Date().toISOString() };
+  try {
+    const userToken = await getUserToken();
+    if (!userToken) throw new Error("Mailbox owner authorization is unavailable.");
+    const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
+    const targets = (logsData.items || []).filter((record) => {
+      const fields = record.fields || {};
+      const actionable = ["draft_reply", "manual_review"].includes(String(fields["处理动作"] || ""));
+      return actionable
+        && String(fields["接收时间"] || "") >= "2026-07-14 13:00:00"
+        && !String(fields["身份校验"] || "").trim()
+        && String(fields["邮件ID"] || "");
+    });
+    let corrected = 0;
+    let targetFound = false;
+    let targetStatus = "";
+    const dryRunFeishu = dryRunFeishuClient();
+    for (const record of targets) {
+      const fields = record.fields || {};
+      const messageId = String(fields["邮件ID"] || "");
+      const fullMessage = await feishu.getMailboxMessage({
+        userMailboxId: "me",
+        messageId,
+        accessToken: userToken.accessToken
+      });
+      const email = mapMailboxMessage(fullMessage, messageId);
+      const result = await processCreatorEmail({ email, feishu: dryRunFeishu, openai, ruleStore });
+      await feishu.updateBitableRecord("emailLog", record.record_id, {
+        "AI草稿": String(result.analysis?.draftReply || ""),
+        "身份校验": result.identityStatus || "brand_reply_verified",
+        "命中规则": [result.matchedRule, result.promotionRule].filter(Boolean).join("; ")
+      });
+      corrected += 1;
+      if (String(fields["接收时间"] || "") === "2026-07-14 13:19:59") {
+        targetFound = true;
+        targetStatus = result.identityStatus || "brand_reply_verified";
+      }
+    }
+    draftIdentityReconciliation = {
+      status: "complete",
+      scanned: targets.length,
+      corrected,
+      targetReceivedAt: "2026-07-14 13:19:59",
+      targetFound,
+      targetStatus,
+      updatedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (error) {
+    draftIdentityReconciliation = {
+      status: "failed",
+      scanned: 0,
+      corrected: 0,
+      updatedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+  return draftIdentityReconciliation;
 }
 
 async function reconcileManualReviewLogs() {
@@ -1921,6 +1985,7 @@ async function route(req, res) {
       dataIntegrityAudit,
       operationalSchemaAudit,
       historicalContextReconciliation,
+      draftIdentityReconciliation,
       missingConfig: getMissingConfig(config)
     });
   }
@@ -2002,6 +2067,7 @@ server.listen(config.port, () => {
       .then(() => ensureOperationalTableFields())
       .then(() => runMailboxWork("startup"))
       .then(() => runClientLiveAcceptance())
+      .then(() => reconcileRecentDraftIdentity())
       .then(() => auditApprovalQueue())
       .then(() => reconcileHistoricalContext(40))
       .then(() => reconcileMissingSenderAddresses(40))
