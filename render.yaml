@@ -10,6 +10,8 @@ services:
       - key: NODE_VERSION
         value: 20
       - key: SAFE_TEST_MODE
+        value: false
+      - key: AUTO_SEND_DRAFT_REPLIES
         value: true
       - key: MAIL_PROVIDER
         value: feishu

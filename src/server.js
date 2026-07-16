@@ -394,7 +394,13 @@ async function processMailboxMessageOnce({ messageId, mailboxId = "me", userToke
     if (!email.from) throw new Error("Mailbox message sender address could not be parsed.");
     if (!email.subject && !email.text) throw new Error("Mailbox message has no readable subject or body.");
 
-    const result = await processCreatorEmail({ email, feishu, openai, ruleStore });
+    const result = await processCreatorEmail({
+      email,
+      feishu,
+      openai,
+      ruleStore,
+      autoSendDraftReplies: config.autoSendDraftReplies
+    });
     if (!getBitableRecordId(result.writeResult)) {
       throw new Error("Email log write did not return a record id.");
     }
@@ -1694,7 +1700,7 @@ async function processApprovedTasks() {
   const candidates = (logsData.items || []).filter((record) => {
     const fields = record.fields || {};
     const status = String(fields["审批状态"] || "");
-    const eligibleStatus = ["待处理", "待人工确认", "已批准", "待发送"].includes(status)
+    const eligibleStatus = ["待处理", "待人工确认", "已批准", "待发送", "待自动发送"].includes(status)
       || (!config.safeTestMode && status === "安全模式拦截");
     return isChecked(fields["是否允许发送"]) && eligibleStatus;
   });
@@ -1709,6 +1715,7 @@ async function processApprovedTasks() {
   let qualityBlocked = 0;
   for (const emailLog of candidates) {
     const fields = emailLog.fields || {};
+    const automaticReply = String(fields["审批状态"] || "") === "待自动发送";
     const messageId = String(fields["邮件ID"] || "");
     const recipient = String(fields["发件人邮箱"] || "").trim();
     const draft = String(fields["人工修改稿"] || fields["AI草稿"] || "").trim();
@@ -1733,7 +1740,7 @@ async function processApprovedTasks() {
     const qualityIssues = validateDraftQuality({
       email,
       draft,
-      action: "manual_review",
+      action: String(fields["处理动作"] || "manual_review"),
       promotionRule
     });
     if (qualityIssues.length) {
@@ -1782,8 +1789,8 @@ async function processApprovedTasks() {
       });
       await feishu.updateBitableRecord("emailLog", emailLog.record_id, { "审批状态": "发送失败" });
       await feishu.createBitableRecord("actionLogs", {
-        "事件类型": "approved_mail_send_failed",
-        "事件来源": "email_log_approval",
+        "事件类型": automaticReply ? "automatic_mail_send_failed" : "approved_mail_send_failed",
+        "事件来源": automaticReply ? "automatic_reply" : "email_log_approval",
         "操作内容": subject,
         "操作结果": "failed",
         "错误信息": error.message,
@@ -1807,8 +1814,8 @@ async function processApprovedTasks() {
       "回复发送时间": replySentAt
     });
     await feishu.createBitableRecord("actionLogs", {
-      "事件类型": "approved_mail_sent",
-      "事件来源": "email_log_approval",
+      "事件类型": automaticReply ? "automatic_mail_sent" : "approved_mail_sent",
+      "事件来源": automaticReply ? "automatic_reply" : "email_log_approval",
       "操作内容": subject,
       "操作结果": result.message_id || "sent",
       "错误信息": "",
@@ -2134,6 +2141,7 @@ async function route(req, res) {
       ok: true,
       service: "creator-mail-ai-workflow",
       safeTestMode: config.safeTestMode,
+      autoSendDraftReplies: config.autoSendDraftReplies,
       redisConfigured: redis.isConfigured(),
       mailboxOAuthRedirectConfigured: Boolean(getOAuthRedirectUri()),
       outboundTracking: "enabled",

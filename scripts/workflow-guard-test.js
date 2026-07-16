@@ -1,4 +1,4 @@
-import { appendPromotionToDraft, processCreatorEmail, validateDraftQuality } from "../src/workflow.js";
+import { appendPromotionToDraft, processCreatorEmail, shouldAutoSendReply, validateDraftQuality } from "../src/workflow.js";
 
 const writes = [];
 const feishu = {
@@ -275,4 +275,27 @@ if (!partialPromotionDraft.includes(promotionRule.applicationLink)
   throw new Error("Expected a partial Jissbon recommendation to be completed with the exact application link.");
 }
 
-console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule, identityStatus: identityRepairResult.identityStatus, qualityStatus: qualityRepairResult.draftQuality.status }));
+const automaticReplyResult = await processCreatorEmail({
+  email: { messageId: "guard-test-11", from: "creator@example.com", subject: "Guard Brand collaboration", text: "I am interested in working with Guard Product." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "general_creator_reply", riskLevel: "Low", action: "draft_reply", summary: "General interest.", draftReply: "Thank you for your interest in working with us. We would be happy to share the next steps." };
+    }
+  },
+  ruleStore,
+  autoSendDraftReplies: true
+});
+const automaticReplyLog = writes.find((write) => write.fields?.["邮件ID"] === "guard-test-11");
+if (!automaticReplyResult.autoSend
+  || automaticReplyLog?.fields?.["审批状态"] !== "待自动发送"
+  || automaticReplyLog?.fields?.["是否允许发送"] !== true) {
+  throw new Error("Expected a matched, clean draft reply to enter automatic sending.");
+}
+if (shouldAutoSendReply({ enabled: true, action: "manual_review", draftQualityStatus: "passed", projectMatches: [{}] })
+  || shouldAutoSendReply({ enabled: true, action: "draft_reply", draftQualityStatus: "repair_required", projectMatches: [{}] })
+  || shouldAutoSendReply({ enabled: true, action: "draft_reply", draftQualityStatus: "passed", projectMatches: [] })) {
+  throw new Error("Automatic sending must remain blocked for manual review, quality failures, and unmatched projects.");
+}
+
+console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule, identityStatus: identityRepairResult.identityStatus, qualityStatus: qualityRepairResult.draftQuality.status, automaticReply: automaticReplyResult.autoSend }));

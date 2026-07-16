@@ -38,6 +38,7 @@ export function getConfig() {
     baseUrl: process.env.APP_BASE_URL || "",
     cronSecret: process.env.CRON_SECRET || "",
     safeTestMode: String(process.env.SAFE_TEST_MODE || "true").toLowerCase() !== "false",
+    autoSendDraftReplies: String(process.env.AUTO_SEND_DRAFT_REPLIES || "false").toLowerCase() === "true",
     testRecipients: readList(process.env.TEST_RECIPIENTS),
     feishu: {
       appId: process.env.FEISHU_APP_ID || "",

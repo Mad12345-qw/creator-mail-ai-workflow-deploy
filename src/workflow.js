@@ -49,6 +49,14 @@ function decideAction(intent) {
   return "draft_reply";
 }
 
+export function shouldAutoSendReply({ enabled, action, draftQualityStatus, projectMatches }) {
+  return Boolean(enabled)
+    && action === "draft_reply"
+    && ["passed", "corrected"].includes(String(draftQualityStatus || ""))
+    && Array.isArray(projectMatches)
+    && projectMatches.length > 0;
+}
+
 function findMatchingRule(email, rules) {
   const text = `${email.subject || ""}\n${email.text || ""}`.toLowerCase();
   const matches = (file) => (rules?.[file]?.rules || []).filter((rule) =>
@@ -207,7 +215,7 @@ async function findRelevantProjects(email, feishu) {
   return active.length === 1 ? active : [];
 }
 
-export async function processCreatorEmail({ email, feishu, openai, ruleStore }) {
+export async function processCreatorEmail({ email, feishu, openai, ruleStore, autoSendDraftReplies = false }) {
   const fallbackIntent = inferIntent(email);
   const [creator, projects] = await Promise.all([
     feishu.findCreatorByEmail(email.from),
@@ -324,6 +332,12 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     !email.subject && !email.text ? "missing_content" : "",
     !projects.length && !["no_reply", "record_only"].includes(action) ? "unmatched_project" : ""
   ].filter(Boolean);
+  const autoSend = shouldAutoSendReply({
+    enabled: autoSendDraftReplies,
+    action,
+    draftQualityStatus,
+    projectMatches: projects
+  });
 
   const logFields = {
     "邮件概览": `${email.receivedAt || "时间待补充"} | ${email.from || "未知发件人"} | ${email.subject || "无主题"}`.slice(0, 500),
@@ -339,8 +353,8 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     "AI摘要": analysis.summary || "",
     "AI草稿": analysis.draftReply || "",
     "人工修改稿": "",
-    "是否允许发送": false,
-    "审批状态": action === "manual_review" ? "待处理" : "无需审批",
+    "是否允许发送": autoSend,
+    "审批状态": autoSend ? "待自动发送" : (action === "manual_review" ? "待处理" : "无需审批"),
     "身份校验": identityStatus,
     "草稿质检": draftQualityStatus,
     "草稿质检问题": draftQualityIssues.join(","),
@@ -350,7 +364,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     "匹配项目": matchedProjectText,
     "命中规则": [matchedRule?.id, promotionRule?.id].filter(Boolean).join("; "),
     "数据完整性": dataQualityIssues.length ? dataQualityIssues.join(",") : "complete",
-    "处理状态": action === "manual_review" ? "待人工确认" : "已记录"
+    "处理状态": autoSend ? "待自动发送" : (action === "manual_review" ? "待人工确认" : "已记录")
   };
 
   const writeResult = await feishu.createBitableRecord("emailLog", logFields);
@@ -368,6 +382,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore }) 
     })),
     matchedRule: matchedRule?.id || null,
     promotionRule: promotionRule?.id || null,
+    autoSend,
     identityStatus,
     draftQuality: {
       status: draftQualityStatus,
