@@ -24,6 +24,7 @@
 
 - `AUTO_SEND_DRAFT_REPLIES=true`：允许符合条件的新邮件自动发送 AI 回复
 - `SAFE_TEST_MODE=false`：解除 `TEST_RECIPIENTS` 测试收件人限制
+- Render 生产环境在未显式设置开关时默认启用自动回复；设置 `AUTO_SEND_DRAFT_REPLIES=false` 可紧急关闭
 - 报价、砍价、协议、付款、投诉及其他人工审核邮件不会自动发送
 - 未匹配项目、无需回复和草稿质检未通过的邮件不会自动发送
 

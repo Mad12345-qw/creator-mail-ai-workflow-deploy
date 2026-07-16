@@ -26,6 +26,11 @@ function readList(value) {
     .filter(Boolean);
 }
 
+function readBoolean(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return String(value).toLowerCase() === "true";
+}
+
 function readTables() {
   return Object.fromEntries(
     Object.entries(TABLE_ENV_KEYS).map(([name, envKey]) => [name, process.env[envKey] || ""])
@@ -33,12 +38,14 @@ function readTables() {
 }
 
 export function getConfig() {
+  const renderProduction = readBoolean(process.env.RENDER, false);
+  const autoSendDraftReplies = readBoolean(process.env.AUTO_SEND_DRAFT_REPLIES, renderProduction);
   return {
     port: Number(process.env.PORT || 8787),
     baseUrl: process.env.APP_BASE_URL || "",
     cronSecret: process.env.CRON_SECRET || "",
-    safeTestMode: String(process.env.SAFE_TEST_MODE || "true").toLowerCase() !== "false",
-    autoSendDraftReplies: String(process.env.AUTO_SEND_DRAFT_REPLIES || "false").toLowerCase() === "true",
+    safeTestMode: autoSendDraftReplies ? false : readBoolean(process.env.SAFE_TEST_MODE, true),
+    autoSendDraftReplies,
     testRecipients: readList(process.env.TEST_RECIPIENTS),
     feishu: {
       appId: process.env.FEISHU_APP_ID || "",
