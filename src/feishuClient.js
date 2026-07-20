@@ -1,4 +1,20 @@
 const FEISHU_BASE_URL = "https://open.feishu.cn/open-apis";
+const FEISHU_REQUEST_TIMEOUT_MS = 25_000;
+
+async function fetchFeishu(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FEISHU_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Feishu request timed out after ${FEISHU_REQUEST_TIMEOUT_MS / 1000} seconds.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 export class FeishuClient {
   constructor(config) {
@@ -23,7 +39,7 @@ export class FeishuClient {
       return this.tenantToken;
     }
 
-    const response = await fetch(`${FEISHU_BASE_URL}/auth/v3/tenant_access_token/internal`, {
+    const response = await fetchFeishu(`${FEISHU_BASE_URL}/auth/v3/tenant_access_token/internal`, {
       method: "POST",
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({
@@ -42,7 +58,7 @@ export class FeishuClient {
 
   async request(path, options = {}) {
     const token = await this.getTenantAccessToken();
-    const response = await fetch(`${FEISHU_BASE_URL}${path}`, {
+    const response = await fetchFeishu(`${FEISHU_BASE_URL}${path}`, {
       ...options,
       headers: {
         authorization: `Bearer ${token}`,
@@ -66,7 +82,7 @@ export class FeishuClient {
       return this.appToken;
     }
 
-    const response = await fetch(`${FEISHU_BASE_URL}/auth/v3/app_access_token/internal`, {
+    const response = await fetchFeishu(`${FEISHU_BASE_URL}/auth/v3/app_access_token/internal`, {
       method: "POST",
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({
@@ -94,7 +110,7 @@ export class FeishuClient {
 
   async requestWithAppToken(path, body) {
     const appToken = await this.getAppAccessToken();
-    const response = await fetch(`${FEISHU_BASE_URL}${path}`, {
+    const response = await fetchFeishu(`${FEISHU_BASE_URL}${path}`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${appToken}`,
@@ -124,7 +140,7 @@ export class FeishuClient {
   }
 
   async requestWithUserToken(path, accessToken, options = {}) {
-    const response = await fetch(`${FEISHU_BASE_URL}${path}`, {
+    const response = await fetchFeishu(`${FEISHU_BASE_URL}${path}`, {
       ...options,
       headers: {
         authorization: `Bearer ${accessToken}`,

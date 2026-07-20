@@ -2370,5 +2370,4 @@ server.listen(config.port, () => {
         console.error("Startup validation failed:", error.message);
       });
   }, 3_000);
-  setInterval(() => scheduleMailboxPoll("interval"), 60_000).unref();
 });
