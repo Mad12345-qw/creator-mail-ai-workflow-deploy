@@ -36,7 +36,7 @@ let operationalSchemaAudit = { status: "not_started" };
 let historicalContextReconciliation = { status: "not_started" };
 let draftIdentityReconciliation = { status: "not_started" };
 let draftQualityAudit = { status: "not_started" };
-let suppressedAutoReplyReconciliation = { status: "not_started" };
+let recentAutomatedReplyReconciliation = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -1409,14 +1409,17 @@ function isWithinRecentMailWindow(value, windowMs) {
   return Number.isFinite(timestamp) && timestamp >= Date.now() - windowMs;
 }
 
-async function reconcileSuppressedAutoReplyLogs() {
-  suppressedAutoReplyReconciliation = { status: "running", scanned: 0, corrected: 0, skipped: 0, updatedAt: new Date().toISOString() };
+async function reconcileRecentAutomatedReplyLogs() {
+  recentAutomatedReplyReconciliation = { status: "running", scanned: 0, corrected: 0, skipped: 0, updatedAt: new Date().toISOString() };
   try {
     const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
     const records = (logsData.items || []).filter((record) => {
       const fields = record.fields || {};
-      return String(fields["AI识别类型"] || "") === "auto_reply"
-        && String(fields["处理动作"] || "") === "no_reply"
+      const action = String(fields["处理动作"] || "");
+      const intent = String(fields["AI识别类型"] || "");
+      const autoReplySuppressed = intent === "auto_reply" && action === "no_reply";
+      const modelOnlyManualReview = action === "manual_review" && !requiresManualReviewIntent(intent);
+      return (autoReplySuppressed || modelOnlyManualReview)
         && isWithinRecentMailWindow(fields["接收时间"], SUPPRESSED_AUTO_REPLY_REPROCESS_WINDOW_MS);
     });
     let corrected = 0;
@@ -1445,7 +1448,7 @@ async function reconcileSuppressedAutoReplyLogs() {
           autoSendDraftReplies: config.autoSendDraftReplies,
           writeLog: false
         });
-        if (result.action === "no_reply" || result.action === "record_only") {
+        if (result.action !== "draft_reply") {
           skipped += 1;
           continue;
         }
@@ -1460,7 +1463,7 @@ async function reconcileSuppressedAutoReplyLogs() {
         errors.push(error.message);
       }
     }
-    suppressedAutoReplyReconciliation = {
+    recentAutomatedReplyReconciliation = {
       status: errors.length ? "completed_with_errors" : "complete",
       scanned: records.length,
       corrected,
@@ -1469,7 +1472,7 @@ async function reconcileSuppressedAutoReplyLogs() {
       updatedAt: new Date().toISOString()
     };
   } catch (error) {
-    suppressedAutoReplyReconciliation = {
+    recentAutomatedReplyReconciliation = {
       status: "failed",
       scanned: 0,
       corrected: 0,
@@ -1478,7 +1481,7 @@ async function reconcileSuppressedAutoReplyLogs() {
       updatedAt: new Date().toISOString()
     };
   }
-  return suppressedAutoReplyReconciliation;
+  return recentAutomatedReplyReconciliation;
 }
 
 async function auditDataIntegrity() {
@@ -1918,7 +1921,7 @@ async function runMailboxWork(reason) {
   }
   try {
     const poll = await pollMailbox();
-    await reconcileSuppressedAutoReplyLogs();
+    await reconcileRecentAutomatedReplyLogs();
     const approvals = await processApprovedTasks();
     await auditApprovalQueue();
     await auditMailboxInbox();
@@ -2246,7 +2249,7 @@ async function route(req, res) {
       historicalContextReconciliation,
       draftIdentityReconciliation,
       draftQualityAudit,
-      suppressedAutoReplyReconciliation,
+      recentAutomatedReplyReconciliation,
       missingConfig: getMissingConfig(config)
     });
   }

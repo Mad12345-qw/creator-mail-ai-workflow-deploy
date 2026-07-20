@@ -231,7 +231,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore, au
   const action = matchedRule?.action || (
     ["manual_review", "no_reply", "record_only"].includes(requiredAction)
       ? requiredAction
-      : (["draft_reply", "manual_review"].includes(analysis.action) ? analysis.action : requiredAction)
+      : "draft_reply"
   );
   if (["draft_reply", "manual_review"].includes(action) && !String(analysis.draftReply || "").trim()) {
     const repaired = await openai.analyzeEmail(email, {

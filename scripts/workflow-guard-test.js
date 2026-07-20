@@ -312,4 +312,19 @@ if (formerlySuppressedResult.action !== "draft_reply" || !formerlySuppressedResu
   throw new Error("Auto-reply classifications must no longer suppress ordinary mail.");
 }
 
+const modelManualResult = await processCreatorEmail({
+  email: { messageId: "guard-test-13", from: "creator@example.com", subject: "General collaboration", text: "I am interested in learning more about the product." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "general_creator_reply", riskLevel: "Low", action: "manual_review", summary: "General interest.", draftReply: "Thank you for your interest in collaborating with us." };
+    }
+  },
+  ruleStore,
+  autoSendDraftReplies: true
+});
+if (modelManualResult.action !== "draft_reply" || !modelManualResult.autoSend) {
+  throw new Error("Model-only manual review must not block ordinary mail from automatic sending.");
+}
+
 console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule, identityStatus: identityRepairResult.identityStatus, qualityStatus: qualityRepairResult.draftQuality.status, automaticReply: automaticReplyResult.autoSend }));
