@@ -2275,13 +2275,9 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && path === "/cron/keepalive") {
-    const result = await runMailboxWork("keepalive");
-    return sendJson(res, 200, {
-      ok: true,
-      poll: result.poll,
-      approvals: result.approvals,
-      recentAutomatedReplyReconciliation
-    });
+    // A keepalive must acknowledge promptly; mailbox work continues under its Redis lock.
+    scheduleMailboxPoll("keepalive");
+    return sendText(res, 200, "ok");
   }
 
   if (req.method === "POST" && path === "/webhook/feishu") {
