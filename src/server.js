@@ -1907,9 +1907,9 @@ async function processApprovedTasks() {
 }
 
 async function runMailboxWork(reason) {
-  const lockName = "mailbox-work-lock";
+  const lockName = "mailbox-work-lock-v2";
   const lockToken = randomUUID();
-  const locked = redis.isConfigured() ? await redis.acquireLock(lockName, lockToken, 900) : true;
+  const locked = redis.isConfigured() ? await redis.acquireLock(lockName, lockToken, 300) : true;
   if (!locked) {
     return {
       poll: { status: "already_running", processed: 0 },
@@ -1918,7 +1918,6 @@ async function runMailboxWork(reason) {
   }
   try {
     const poll = await pollMailbox();
-    await reconcileManualReviewLogs();
     await reconcileSuppressedAutoReplyLogs();
     const approvals = await processApprovedTasks();
     await auditApprovalQueue();
