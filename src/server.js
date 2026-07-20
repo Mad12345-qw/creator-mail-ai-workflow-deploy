@@ -1910,9 +1910,9 @@ async function processApprovedTasks() {
 }
 
 async function runMailboxWork(reason) {
-  const lockName = "mailbox-work-lock-v2";
+  const lockName = "mailbox-work-lock-v3";
   const lockToken = randomUUID();
-  const locked = redis.isConfigured() ? await redis.acquireLock(lockName, lockToken, 300) : true;
+  const locked = redis.isConfigured() ? await redis.acquireLock(lockName, lockToken, 120) : true;
   if (!locked) {
     return {
       poll: { status: "already_running", processed: 0 },
@@ -1923,14 +1923,20 @@ async function runMailboxWork(reason) {
     const poll = await pollMailbox();
     await reconcileRecentAutomatedReplyLogs();
     const approvals = await processApprovedTasks();
-    await auditApprovalQueue();
-    await auditMailboxInbox();
-    await auditDataIntegrity();
+    scheduleMailboxAudits(reason);
     console.log(`Mailbox work (${reason}):`, poll.status, approvals.sent);
     return { poll, approvals };
   } finally {
     if (redis.isConfigured()) await redis.releaseLock(lockName, lockToken).catch(() => {});
   }
+}
+
+function scheduleMailboxAudits(reason) {
+  Promise.all([
+    auditApprovalQueue(),
+    auditMailboxInbox(),
+    auditDataIntegrity()
+  ]).catch((error) => console.error(`Mailbox audits failed (${reason}):`, error.message));
 }
 
 function scheduleMailboxPoll(reason) {
@@ -2255,8 +2261,13 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && path === "/cron/keepalive") {
-    scheduleMailboxPoll("keepalive");
-    return sendText(res, 200, "ok");
+    const result = await runMailboxWork("keepalive");
+    return sendJson(res, 200, {
+      ok: true,
+      poll: result.poll,
+      approvals: result.approvals,
+      recentAutomatedReplyReconciliation
+    });
   }
 
   if (req.method === "POST" && path === "/webhook/feishu") {
