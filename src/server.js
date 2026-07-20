@@ -36,11 +36,13 @@ let operationalSchemaAudit = { status: "not_started" };
 let historicalContextReconciliation = { status: "not_started" };
 let draftIdentityReconciliation = { status: "not_started" };
 let draftQualityAudit = { status: "not_started" };
+let suppressedAutoReplyReconciliation = { status: "not_started" };
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
 const CLIENT_WIKI_URL = "https://zcn1ftnw54fl.feishu.cn/wiki/H0tkwIRmYiQ1wnks74Nc2m4kn5e";
 const MAILBOX_POLL_SCAN_LIMIT = 500;
+const SUPPRESSED_AUTO_REPLY_REPROCESS_WINDOW_MS = 24 * 60 * 60 * 1000;
 const OPERATIONAL_TABLE_FIELDS = {
   emailLog: [
     { field_name: "邮件ID", type: 1 },
@@ -1401,6 +1403,84 @@ async function reconcileManualReviewLogs() {
   return manualReviewReconciliation;
 }
 
+function isWithinRecentMailWindow(value, windowMs) {
+  const normalized = String(value || "").trim().replace(" ", "T");
+  const timestamp = Date.parse(`${normalized}+08:00`);
+  return Number.isFinite(timestamp) && timestamp >= Date.now() - windowMs;
+}
+
+async function reconcileSuppressedAutoReplyLogs() {
+  suppressedAutoReplyReconciliation = { status: "running", scanned: 0, corrected: 0, skipped: 0, updatedAt: new Date().toISOString() };
+  try {
+    const logsData = await feishu.listAllBitableRecords("emailLog", { maxRecords: 1000 });
+    const records = (logsData.items || []).filter((record) => {
+      const fields = record.fields || {};
+      return String(fields["AI识别类型"] || "") === "auto_reply"
+        && String(fields["处理动作"] || "") === "no_reply"
+        && isWithinRecentMailWindow(fields["接收时间"], SUPPRESSED_AUTO_REPLY_REPROCESS_WINDOW_MS);
+    });
+    let corrected = 0;
+    let skipped = 0;
+    const errors = [];
+    for (const record of records) {
+      const fields = record.fields || {};
+      const email = {
+        messageId: String(fields["邮件ID"] || ""),
+        from: String(fields["发件人邮箱"] || ""),
+        to: String(fields["收件人邮箱"] || ""),
+        subject: String(fields["邮件主题"] || ""),
+        text: String(fields["邮件正文"] || ""),
+        receivedAt: String(fields["接收时间"] || "")
+      };
+      if (!email.messageId || !email.from || (!email.subject && !email.text)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const result = await processCreatorEmail({
+          email,
+          feishu,
+          openai,
+          ruleStore,
+          autoSendDraftReplies: config.autoSendDraftReplies,
+          writeLog: false
+        });
+        if (result.action === "no_reply" || result.action === "record_only") {
+          skipped += 1;
+          continue;
+        }
+        await feishu.updateBitableRecord("emailLog", record.record_id, {
+          ...result.logFields,
+          "人工修改稿": String(fields["人工修改稿"] || ""),
+          "负责人": String(fields["负责人"] || ""),
+          "人工备注": String(fields["人工备注"] || "")
+        });
+        corrected += 1;
+      } catch (error) {
+        errors.push(error.message);
+      }
+    }
+    suppressedAutoReplyReconciliation = {
+      status: errors.length ? "completed_with_errors" : "complete",
+      scanned: records.length,
+      corrected,
+      skipped,
+      error: errors[0] || "",
+      updatedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    suppressedAutoReplyReconciliation = {
+      status: "failed",
+      scanned: 0,
+      corrected: 0,
+      skipped: 0,
+      error: error.message,
+      updatedAt: new Date().toISOString()
+    };
+  }
+  return suppressedAutoReplyReconciliation;
+}
+
 async function auditDataIntegrity() {
   dataIntegrityAudit = { status: "running", updatedAt: new Date().toISOString() };
   try {
@@ -1839,6 +1919,7 @@ async function runMailboxWork(reason) {
   try {
     const poll = await pollMailbox();
     await reconcileManualReviewLogs();
+    await reconcileSuppressedAutoReplyLogs();
     const approvals = await processApprovedTasks();
     await auditApprovalQueue();
     await auditMailboxInbox();
@@ -2166,6 +2247,7 @@ async function route(req, res) {
       historicalContextReconciliation,
       draftIdentityReconciliation,
       draftQualityAudit,
+      suppressedAutoReplyReconciliation,
       missingConfig: getMissingConfig(config)
     });
   }

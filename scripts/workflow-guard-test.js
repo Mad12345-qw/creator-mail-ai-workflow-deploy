@@ -145,8 +145,8 @@ const unmatchedProjectResult = await processCreatorEmail({
   ruleStore
 });
 
-if (unmatchedProjectResult.action !== "manual_review" || unmatchedProjectResult.projectMatches.length !== 0) {
-  throw new Error("Expected unmatched multi-project email to require manual review without guessing a project.");
+if (unmatchedProjectResult.action !== "draft_reply" || unmatchedProjectResult.projectMatches.length !== 0) {
+  throw new Error("Expected unmatched general email to receive a safe draft without guessing a project.");
 }
 
 const promotionRule = {
@@ -293,9 +293,23 @@ if (!automaticReplyResult.autoSend
   throw new Error("Expected a matched, clean draft reply to enter automatic sending.");
 }
 if (shouldAutoSendReply({ enabled: true, action: "manual_review", draftQualityStatus: "passed", projectMatches: [{}] })
-  || shouldAutoSendReply({ enabled: true, action: "draft_reply", draftQualityStatus: "repair_required", projectMatches: [{}] })
-  || shouldAutoSendReply({ enabled: true, action: "draft_reply", draftQualityStatus: "passed", projectMatches: [] })) {
-  throw new Error("Automatic sending must remain blocked for manual review, quality failures, and unmatched projects.");
+  || shouldAutoSendReply({ enabled: true, action: "draft_reply", draftQualityStatus: "repair_required", projectMatches: [{}] })) {
+  throw new Error("Automatic sending must remain blocked for manual review and quality failures.");
+}
+
+const formerlySuppressedResult = await processCreatorEmail({
+  email: { messageId: "guard-test-12", from: "creator@example.com", subject: "Automatic reply test", text: "Please reply to this ordinary collaboration message." },
+  feishu,
+  openai: {
+    async analyzeEmail() {
+      return { intent: "auto_reply", riskLevel: "Low", action: "no_reply", summary: "Incorrectly suppressed.", draftReply: "" };
+    }
+  },
+  ruleStore,
+  autoSendDraftReplies: true
+});
+if (formerlySuppressedResult.action !== "draft_reply" || !formerlySuppressedResult.autoSend || !String(formerlySuppressedResult.analysis.draftReply || "").trim()) {
+  throw new Error("Auto-reply classifications must no longer suppress ordinary mail.");
 }
 
 console.log(JSON.stringify({ ok: true, paidAction: paidResult.action, bounceAction: bounceResult.action, verificationAction: verificationResult.action, paidOnlyAction: paidOnlyResult.action, mixedRuleAction: mixedRuleResult.action, unmatchedProjectAction: unmatchedProjectResult.action, promotionRule: promotedSampleResult.promotionRule, identityStatus: identityRepairResult.identityStatus, qualityStatus: qualityRepairResult.draftQuality.status, automaticReply: automaticReplyResult.autoSend }));

@@ -18,8 +18,7 @@ export function requiresManualReviewIntent(intent) {
 
 export function requiresNoReplyIntent(intent) {
   const normalized = String(intent || "").trim().toLowerCase();
-  return normalized === "auto_reply"
-    || /(test_message|test_email|bounce|delivery_failure|delivery_status|verification_notification|email_forwarding_verification|email_verification)/.test(normalized);
+  return /(test_message|test_email|bounce|delivery_failure|delivery_status|verification_notification|email_forwarding_verification|email_verification)/.test(normalized);
 }
 
 export function hasCreatorRoleConfusion(draft) {
@@ -38,7 +37,6 @@ function inferIntent(email) {
   if (/payment|paypal|bank|invoice|paid/.test(text)) return "payment_issue";
   if (/sample|shipping|address|tracking/.test(text)) return "sample_or_shipping";
   if (/unsubscribe|remove me|stop contacting/.test(text)) return "stop_contact";
-  if (/out of office|automatic reply|auto reply/.test(text)) return "auto_reply";
   return "general_creator_reply";
 }
 
@@ -52,9 +50,7 @@ function decideAction(intent) {
 export function shouldAutoSendReply({ enabled, action, draftQualityStatus, projectMatches }) {
   return Boolean(enabled)
     && action === "draft_reply"
-    && ["passed", "corrected"].includes(String(draftQualityStatus || ""))
-    && Array.isArray(projectMatches)
-    && projectMatches.length > 0;
+    && ["passed", "corrected"].includes(String(draftQualityStatus || ""));
 }
 
 function findMatchingRule(email, rules) {
@@ -64,18 +60,13 @@ function findMatchingRule(email, rules) {
   );
   const noReplyMatches = matches("no-reply-rules.json");
   const hardNoReply = noReplyMatches.find((rule) =>
-    ["system-delivery-notice", "auto-reply", "stop-contact"].includes(rule.id)
+    ["system-delivery-notice", "stop-contact"].includes(rule.id)
   );
   if (hardNoReply) return hardNoReply;
 
   const manualMatch = matches("manual-review-rules.json")[0];
   if (manualMatch) return manualMatch;
 
-  const simpleAck = noReplyMatches.find((rule) => rule.id === "simple-ack");
-  const hasBusinessSignal = /\?|\brate\b|quote|price|fee|budget|paid|commission|agreement|contract|payment|sample|shipping/.test(text);
-  if (simpleAck && !hasBusinessSignal && text.length <= 160) {
-    return simpleAck;
-  }
   return null;
 }
 
@@ -215,7 +206,7 @@ async function findRelevantProjects(email, feishu) {
   return active.length === 1 ? active : [];
 }
 
-export async function processCreatorEmail({ email, feishu, openai, ruleStore, autoSendDraftReplies = false }) {
+export async function processCreatorEmail({ email, feishu, openai, ruleStore, autoSendDraftReplies = false, writeLog = true }) {
   const fallbackIntent = inferIntent(email);
   const [creator, projects] = await Promise.all([
     feishu.findCreatorByEmail(email.from),
@@ -234,17 +225,13 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore, au
 
   let analysis = await openai.analyzeEmail(email, context);
   const intent = analysis.intent && analysis.intent !== "unconfigured" ? analysis.intent : fallbackIntent;
-  const permittedActions = new Set(["no_reply", "record_only", "draft_reply", "manual_review"]);
   let requiredAction = requiresManualReviewIntent(intent) || requiresManualReviewIntent(fallbackIntent)
     ? "manual_review"
     : decideAction(intent);
-  if (!projects.length && !["no_reply", "record_only"].includes(requiredAction)) {
-    requiredAction = "manual_review";
-  }
   const action = matchedRule?.action || (
     ["manual_review", "no_reply", "record_only"].includes(requiredAction)
       ? requiredAction
-      : (permittedActions.has(analysis.action) ? analysis.action : requiredAction)
+      : (["draft_reply", "manual_review"].includes(analysis.action) ? analysis.action : requiredAction)
   );
   if (["draft_reply", "manual_review"].includes(action) && !String(analysis.draftReply || "").trim()) {
     const repaired = await openai.analyzeEmail(email, {
@@ -367,7 +354,9 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore, au
     "处理状态": autoSend ? "待自动发送" : (action === "manual_review" ? "待人工确认" : "已记录")
   };
 
-  const writeResult = await feishu.createBitableRecord("emailLog", logFields);
+  const writeResult = writeLog
+    ? await feishu.createBitableRecord("emailLog", logFields)
+    : { skipped: true, dryRun: true };
   const approvalResult = null;
 
   return {
@@ -383,6 +372,7 @@ export async function processCreatorEmail({ email, feishu, openai, ruleStore, au
     matchedRule: matchedRule?.id || null,
     promotionRule: promotionRule?.id || null,
     autoSend,
+    logFields,
     identityStatus,
     draftQuality: {
       status: draftQualityStatus,
