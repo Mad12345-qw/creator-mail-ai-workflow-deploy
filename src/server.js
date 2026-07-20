@@ -37,6 +37,7 @@ let historicalContextReconciliation = { status: "not_started" };
 let draftIdentityReconciliation = { status: "not_started" };
 let draftQualityAudit = { status: "not_started" };
 let recentAutomatedReplyReconciliation = { status: "not_started" };
+let recentAutomatedReplyReconciliationRunning = false;
 
 const CLIENT_INTAKE_TABLE_NAME = "项目与产品插件库";
 const CLIENT_INTAKE_VIEW_NAME = "项目与产品填写表";
@@ -1484,6 +1485,20 @@ async function reconcileRecentAutomatedReplyLogs() {
   return recentAutomatedReplyReconciliation;
 }
 
+function scheduleRecentAutomatedReplyReconciliation(reason) {
+  if (recentAutomatedReplyReconciliationRunning) return;
+  recentAutomatedReplyReconciliationRunning = true;
+  Promise.resolve()
+    .then(async () => {
+      const result = await reconcileRecentAutomatedReplyLogs();
+      if (result.corrected) await processApprovedTasks();
+    })
+    .catch((error) => console.error(`Recent automated reply reconciliation failed (${reason}):`, error.message))
+    .finally(() => {
+      recentAutomatedReplyReconciliationRunning = false;
+    });
+}
+
 async function auditDataIntegrity() {
   dataIntegrityAudit = { status: "running", updatedAt: new Date().toISOString() };
   try {
@@ -1921,8 +1936,8 @@ async function runMailboxWork(reason) {
   }
   try {
     const poll = await pollMailbox();
-    await reconcileRecentAutomatedReplyLogs();
     const approvals = await processApprovedTasks();
+    scheduleRecentAutomatedReplyReconciliation(reason);
     scheduleMailboxAudits(reason);
     console.log(`Mailbox work (${reason}):`, poll.status, approvals.sent);
     return { poll, approvals };
