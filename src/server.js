@@ -1419,8 +1419,7 @@ async function reconcileRecentAutomatedReplyLogs() {
       const action = String(fields["处理动作"] || "");
       const intent = String(fields["AI识别类型"] || "");
       const autoReplySuppressed = intent === "auto_reply" && action === "no_reply";
-      const modelOnlyManualReview = action === "manual_review" && !requiresManualReviewIntent(intent);
-      return (autoReplySuppressed || modelOnlyManualReview)
+      return autoReplySuppressed
         && isWithinRecentMailWindow(fields["接收时间"], SUPPRESSED_AUTO_REPLY_REPROCESS_WINDOW_MS);
     });
     let corrected = 0;
